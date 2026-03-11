@@ -144,16 +144,15 @@ function App() {
             // Normalize domain
             const normalizedDomain = currentSearch.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
 
-            // Safety timeout to prevent infinite "Running..." state
+            // Safety timeout increased to 60s for slow audits
             const safetyTimer = setTimeout(() => {
                 if (psResolvedCount < 2) {
-                    console.warn("PageSpeed Insight scan timed out after 45s");
+                    console.warn("PageSpeed Insight scan timed out after 60s");
                     setPageSpeedLoading(false);
                 }
-            }, 45000);
+            }, 60000);
 
             strategies.forEach(type => {
-                // Check frontend cache first
                 if (cache[currentSearch]?.[`pageSpeed_${type}`]) {
                     const cachedData = cache[currentSearch][`pageSpeed_${type}`];
                     if (type === 'mobile') setPageSpeedMobile(cachedData);
@@ -166,11 +165,36 @@ function App() {
                     return;
                 }
 
-                // Try both https versions if needed, but start with the one provided
-                const url = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${normalizedDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`;
+                // Robust Audit Helper
+                const runAudit = async (targetDomain) => {
+                    const tryUrls = [
+                        // Try 1: Proxy (better for deployment environment IP reputation)
+                        `/api/pagespeed?domain=${targetDomain}&strategy=${type}`,
+                        // Try 2: Direct with www as fallback
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        // Try 3: Root if subdomain fails
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`
+                    ];
 
-                axios.get(url, { timeout: 60000 }).then(res => {
-                    const data = res.data;
+                    let lastErr = null;
+                    for (const url of tryUrls) {
+                        try {
+                            console.log(`PageSpeed [${type}] - Attempting ${url}...`);
+                            const res = await axios.get(url, { timeout: 45000 });
+                            if (res.data?.lighthouseResult || res.data?.loadingExperience) return res.data;
+                        } catch (e) {
+                            lastErr = e;
+                            console.warn(`PageSpeed [${type}] failed for ${url}:`, e.message);
+                        }
+                    }
+                    throw lastErr || new Error('All PageSpeed attempts failed');
+                };
+
+                withRetry(() => runAudit(normalizedDomain), {
+                    maxRetries: 2,
+                    initialDelay: 3000,
+                    onRetry: (count) => console.log(`Retrying PageSpeed [${type}] (${count}/2)...`)
+                }).then(data => {
                     if (activeSearchDomain.current === domain) {
                         if (type === 'mobile') setPageSpeedMobile(data);
                         else setPageSpeedDesktop(data);
@@ -178,19 +202,7 @@ function App() {
                         cache[currentSearch][`pageSpeed_${type}`] = data;
                     }
                 }).catch(err => {
-                    console.error(`PageSpeed ${type} API failed for ${normalizedDomain}:`, err.message);
-                    // Fallback: try with www. if it wasn't there
-                    if (!normalizedDomain.startsWith('www.')) {
-                        const wwwUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${normalizedDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`;
-                        axios.get(wwwUrl, { timeout: 30000 }).then(wwwRes => {
-                            if (activeSearchDomain.current === domain) {
-                                if (type === 'mobile') setPageSpeedMobile(wwwRes.data);
-                                else setPageSpeedDesktop(wwwRes.data);
-                                if (!cache[currentSearch]) cache[currentSearch] = {};
-                                cache[currentSearch][`pageSpeed_${type}`] = wwwRes.data;
-                            }
-                        }).catch(e => console.error("WWW PageSpeed fallback also failed:", e.message));
-                    }
+                    console.error(`PageSpeed ${type} ultimate failure:`, err.message);
                 }).finally(() => {
                     if (activeSearchDomain.current === domain) {
                         psResolvedCount++;
