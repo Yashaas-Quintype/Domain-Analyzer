@@ -43,10 +43,17 @@ const processTech = (allTechnologies) => {
  */
 const getDomainRoot = (hostname) => {
     if (!hostname) return '';
-    const parts = hostname.split('.');
-    if (parts.length <= 2) return hostname;
-    // Basic root domain extraction (last two parts)
-    // Note: Doesn't handle complex TLDs like .co.uk perfectly but works for most
+    const cleaned = hostname.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
+    const parts = cleaned.split('.');
+    if (parts.length <= 2) return cleaned;
+
+    // Handle multi-part TLDs like .co.uk, .com.au, etc.
+    const multiPartTlds = ['co.uk', 'org.uk', 'me.uk', 'net.uk', 'com.au', 'net.au', 'org.au', 'co.in', 'net.in', 'org.in'];
+    const lastTwo = parts.slice(-2).join('.');
+    if (multiPartTlds.includes(lastTwo) && parts.length > 2) {
+        return parts.slice(-3).join('.');
+    }
+
     return parts.slice(-2).join('.');
 };
 
@@ -77,6 +84,7 @@ function App() {
     const [pageSpeedLoading, setPageSpeedLoading] = useState(false);
     const [trafficLoading, setTrafficLoading] = useState(false);
     const [techLoading, setTechLoading] = useState(false);
+    const [lushaRequested, setLushaRequested] = useState(false);
 
     const handleAnalyze = async (e) => {
         e.preventDefault();
@@ -98,7 +106,8 @@ function App() {
         setError(null);
         setData(null);
         setTechStack(null);
-        setLushaLoading(true);
+        setLushaRequested(false);
+        setLushaLoading(false);
         setLushaError(null);
         setLushaData(null);
         setScrapedLoading(false);
@@ -122,7 +131,8 @@ function App() {
         setPageSpeedLoading(true);
         setTrafficLoading(true);
         setTechLoading(true);
-        setLushaLoading(true);
+        // Lusha is no longer auto-loading
+        setLushaLoading(false);
 
         const strategies = ['mobile', 'desktop'];
         let psResolvedCount = 0;
@@ -137,16 +147,15 @@ function App() {
             // Normalize domain
             const normalizedDomain = currentSearch.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
 
-            // Safety timeout to prevent infinite "Running..." state
+            // Safety timeout increased to 60s for slow audits
             const safetyTimer = setTimeout(() => {
                 if (psResolvedCount < 2) {
-                    console.warn("PageSpeed Insight scan timed out after 45s");
+                    console.warn("PageSpeed Insight scan timed out after 60s");
                     setPageSpeedLoading(false);
                 }
-            }, 45000);
+            }, 60000);
 
             strategies.forEach(type => {
-                // Check frontend cache first
                 if (cache[currentSearch]?.[`pageSpeed_${type}`]) {
                     const cachedData = cache[currentSearch][`pageSpeed_${type}`];
                     if (type === 'mobile') setPageSpeedMobile(cachedData);
@@ -159,11 +168,36 @@ function App() {
                     return;
                 }
 
-                // Try both https versions if needed, but start with the one provided
-                const url = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${normalizedDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`;
+                // Robust Audit Helper
+                const runAudit = async (targetDomain) => {
+                    const tryUrls = [
+                        // Try 1: Direct Google API (works on localhost and Vercel)
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        // Try 2: www. prefix variant (for sites that redirect to www)
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        // Try 3: Via Vercel proxy (fallback for Vercel deployment if direct is blocked)
+                        `/api/pagespeed?domain=${targetDomain}&strategy=${type}`
+                    ];
 
-                axios.get(url, { timeout: 60000 }).then(res => {
-                    const data = res.data;
+                    let lastErr = null;
+                    for (const url of tryUrls) {
+                        try {
+                            console.log(`PageSpeed [${type}] - Attempting ${url}...`);
+                            const res = await axios.get(url, { timeout: 45000 });
+                            if (res.data?.lighthouseResult || res.data?.loadingExperience) return res.data;
+                        } catch (e) {
+                            lastErr = e;
+                            console.warn(`PageSpeed [${type}] failed for ${url}:`, e.message);
+                        }
+                    }
+                    throw lastErr || new Error('All PageSpeed attempts failed');
+                };
+
+                withRetry(() => runAudit(normalizedDomain), {
+                    maxRetries: 2,
+                    initialDelay: 3000,
+                    onRetry: (count) => console.log(`Retrying PageSpeed [${type}] (${count}/2)...`)
+                }).then(data => {
                     if (activeSearchDomain.current === domain) {
                         if (type === 'mobile') setPageSpeedMobile(data);
                         else setPageSpeedDesktop(data);
@@ -171,19 +205,7 @@ function App() {
                         cache[currentSearch][`pageSpeed_${type}`] = data;
                     }
                 }).catch(err => {
-                    console.error(`PageSpeed ${type} API failed for ${normalizedDomain}:`, err.message);
-                    // Fallback: try with www. if it wasn't there
-                    if (!normalizedDomain.startsWith('www.')) {
-                        const wwwUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${normalizedDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`;
-                        axios.get(wwwUrl, { timeout: 30000 }).then(wwwRes => {
-                            if (activeSearchDomain.current === domain) {
-                                if (type === 'mobile') setPageSpeedMobile(wwwRes.data);
-                                else setPageSpeedDesktop(wwwRes.data);
-                                if (!cache[currentSearch]) cache[currentSearch] = {};
-                                cache[currentSearch][`pageSpeed_${type}`] = wwwRes.data;
-                            }
-                        }).catch(e => console.error("WWW PageSpeed fallback also failed:", e.message));
-                    }
+                    console.error(`PageSpeed ${type} ultimate failure:`, err.message);
                 }).finally(() => {
                     if (activeSearchDomain.current === domain) {
                         psResolvedCount++;
@@ -209,7 +231,7 @@ function App() {
             });
         };
 
-        const hasTrafficData = (d) => !!(d && (d.Engagments?.Visits || (d.EstimatedMonthlyVisits && Object.keys(d.EstimatedMonthlyVisits).length > 0)));
+        const hasTrafficData = (d) => !!(d && (d.Engagments || d.EstimatedMonthlyVisits));
 
         fetchTraffic(domain).then(async (res) => {
             if (activeSearchDomain.current !== domain) return;
@@ -256,7 +278,12 @@ function App() {
         // 2. BuiltWith API
         const fetchBuiltWith = async (targetDomain) => {
             console.log(`Attempting BuiltWith lookup for: ${targetDomain}`);
-            return withRetry(() => axios.get(`/api/builtwith/v22/api.json?KEY=${import.meta.env.VITE_BUILTWITH_KEY || 'ea894525-80c8-4320-b284-44f5eb507593'}&LOOKUP=${targetDomain}`), {
+            return withRetry(() => axios.get(`/api/builtwith/v22/api.json`, {
+                params: {
+                    KEY: import.meta.env.VITE_BUILTWITH_KEY || 'ea894525-80c8-4320-b284-44f5eb507593',
+                    LOOKUP: targetDomain
+                }
+            }), {
                 onRetry: (count) => setRetryingStatus(`Retrying Tech Stack API (${count}/3)...`)
             });
         };
@@ -305,15 +332,26 @@ function App() {
             if (currentRelevant) setTechLoading(false);
         });
 
+        // Lusha API is now manual. 
+        // We handle it in handleLushaUnlock
+        setLoading(false);
+    };
+
+    const handleLushaUnlock = async () => {
+        if (!domain || activeSearchDomain.current !== domain) return;
+        setLushaRequested(true);
+        setLushaLoading(true);
+        setLushaError(null);
+
+        const currentSearch = domain.toLowerCase().trim();
+
         // 3. Lusha API 
-        let isStillActive = true;
         searchDecisionMakers(domain, {
             onRetry: (status) => setRetryingStatus(`Retrying: ${status}`)
         })
             .then(async (lushaResults) => {
                 // Check if this search is still relevant
                 if (activeSearchDomain.current !== domain) {
-                    isStillActive = false;
                     return;
                 }
 
@@ -323,14 +361,12 @@ function App() {
 
                 // If no contacts found, THEN and ONLY THEN run the scraper to find a parent
                 if (!lushaResults || !lushaResults.contacts || lushaResults.contacts.length === 0) {
-                    console.log(`No contacts found for ${domain}. Scanning for parent company fallback...`);
                     setScrapedLoading(true);
 
                     try {
                         let scraperData = null;
 
                         // Step A: Check knowledge base locally first
-                        // We duplicate the KB logic here for speed and frontend-only operation
                         const cleanD = domain.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
                         const KB = {
                             'footballinsider247.com': { name: 'Breaking Media Ltd', potentialParentWebsites: ['breakingmedialimited.com', 'breakingmedia.com', 'breakingmedialimted.com', 'grv.media'] },
@@ -344,16 +380,12 @@ function App() {
                         };
 
                         if (KB[cleanD]) {
-                            console.log(`✓ (Frontend) Using knowledge base for ${cleanD}`);
                             scraperData = { ...KB[cleanD], parentWebsite: KB[cleanD].potentialParentWebsites[0] };
                         } else {
-                            // Step B: Try backend
                             try {
                                 const res = await axios.get('/api/scrape', { params: { domain }, timeout: 5000 });
                                 scraperData = res.data;
                             } catch (e) {
-                                console.warn("Backend scraper failed, trying client-side fallback...");
-                                // Step C: Client-side fallback (might fail CORS)
                                 scraperData = await scrapeLegal(domain);
                             }
                         }
@@ -364,14 +396,10 @@ function App() {
 
                             if (scraperData.potentialParentWebsites && scraperData.potentialParentWebsites.length > 0) {
                                 const parents = scraperData.potentialParentWebsites;
-                                console.log(`Fallback: Found ${parents.length} potential parent companies:`, parents);
-
                                 for (const parent of parents) {
-                                    // Ensure we still care about this search
                                     if (activeSearchDomain.current !== domain && !parents.includes(activeSearchDomain.current)) break;
                                     if (parent.toLowerCase() === domain.toLowerCase()) continue;
 
-                                    console.log(`Searching contacts for parent: ${parent}...`);
                                     setRedirectingParent(parent);
                                     activeSearchDomain.current = parent;
                                     setLushaLoading(true);
@@ -384,7 +412,6 @@ function App() {
                                         });
 
                                         if (parentLushaResults && parentLushaResults.contacts && parentLushaResults.contacts.length > 0) {
-                                            console.log(`✓ Found ${parentLushaResults.contacts.length} contacts for parent: ${parent}`);
                                             if (activeSearchDomain.current === parent) {
                                                 setLushaData(parentLushaResults);
                                                 cache[currentSearch].lusha = parentLushaResults;
@@ -393,14 +420,12 @@ function App() {
                                                 break;
                                             }
                                         }
-                                    } catch (e) { console.warn(`Parent search failed:`, e); }
+                                    } catch (e) { }
                                 }
                             }
 
-                            // Final Fallback: If still no contacts, and we have a parent name, try searching by name
                             const currentLushaData = cache[currentSearch].lusha;
                             if ((!currentLushaData || !currentLushaData.contacts || currentLushaData.contacts.length === 0) && scraperData.name) {
-                                console.log(`Attempting final Name Search fallback for: ${scraperData.name}...`);
                                 setRedirectingParent(`Name: ${scraperData.name}`);
                                 setLushaLoading(true);
 
@@ -411,25 +436,21 @@ function App() {
                                     });
 
                                     if (nameResults && nameResults.contacts && nameResults.contacts.length > 0) {
-                                        console.log(`✓ Success via Name Search: Found ${nameResults.contacts.length} contacts.`);
                                         if (activeSearchDomain.current === domain || scraperData.potentialParentWebsites?.includes(activeSearchDomain.current)) {
                                             setLushaData(nameResults);
                                             cache[currentSearch].lusha = nameResults;
                                             setScrapedCompany(scraperData);
                                         }
                                     }
-                                } catch (e) {
-                                    console.warn("Name search fallback failed:", e);
-                                }
+                                } catch (e) { }
                             }
                         }
                     } catch (scraperErr) {
-                        console.error("Total scraper failure:", scraperErr);
                     } finally {
                         setScrapedLoading(false);
                         setRedirectingParent(null);
                         setRetryingStatus(null);
-                        setLushaLoading(false); // Ensure this is cleared
+                        setLushaLoading(false);
                     }
                 } else {
                     setScrapedLoading(false);
@@ -440,17 +461,7 @@ function App() {
             .catch(err => {
                 if (activeSearchDomain.current === domain) {
                     setLushaError(err.message);
-                }
-            })
-            .finally(() => {
-                // We clear loading states if the search is still considered "active" 
-                // (either matched the original domain or one of its parents)
-                const isRelevant = activeSearchDomain.current === domain ||
-                    (cache[currentSearch]?.scraped?.potentialParentWebsites?.includes(activeSearchDomain.current));
-
-                if (isRelevant) {
                     setLushaLoading(false);
-                    setLoading(false);
                 }
             });
     };
@@ -780,6 +791,33 @@ function App() {
                         )}
 
                         <PageSpeedResults mobileData={pageSpeedMobile} desktopData={pageSpeedDesktop} />
+
+                        {!lushaRequested && !lushaData && !lushaLoading && (data || techStack) && (
+                            <div className="w-full mt-8 animate-slide-up animation-delay-300">
+                                <div className="bg-gradient-to-br from-slate-800 to-indigo-900/30 backdrop-blur-md rounded-2xl border border-indigo-500/30 p-8 text-center shadow-2xl relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                                        <svg className="w-24 h-24 text-indigo-400 rotate-12" fill="currentColor" viewBox="0 0 24 24">
+                                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-5-9h10v2H7z" />
+                                        </svg>
+                                    </div>
+                                    <div className="relative z-10">
+                                        <h3 className="text-xl font-bold text-white mb-2">Find Decision Makers</h3>
+                                        <p className="text-slate-300 text-sm mb-6 max-w-md mx-auto">
+                                            Lusha analysis is optional. Click below to prospect verified decision makers, emails, and phone numbers for this domain.
+                                        </p>
+                                        <button
+                                            onClick={handleLushaUnlock}
+                                            className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-full font-bold transition-all shadow-lg shadow-indigo-600/30 flex items-center gap-2 mx-auto active:scale-95"
+                                        >
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                                            </svg>
+                                            Reveal Contacts
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
                         <DecisionMakers
                             results={lushaData?.contacts}
