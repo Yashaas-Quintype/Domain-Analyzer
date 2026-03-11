@@ -107,10 +107,10 @@ const BulkAnalyzer = () => {
             await Promise.all(batch.map(async (domain) => {
                 try {
                     const tryFetchTraffic = async (target) => {
-                        const normalized = target.replace(/^www\./i, '');
-                        // No auth header needed from frontend, proxy handles it
+                        const normalized = target.replace(/^www\\./i, '');
                         return withRetry(() => axios.get(`/api/zyla/api/29/site+traffic+api/93/traffic+source+and+overview`, {
                             params: { domain: normalized },
+                            headers: { 'Authorization': `Bearer ${import.meta.env.VITE_ZYLALABS_KEY || '10095|mmrDs2Whvlc7fD1JKYF2CasMOSaDUZxnVkqhHEzp'}` },
                             timeout: 25000
                         })).catch(e => {
                             console.warn(`Traffic fetch failed for ${target}:`, e.message);
@@ -139,7 +139,10 @@ const BulkAnalyzer = () => {
                     }
 
                     const fetchBW = (target) => withRetry(() => axios.get(`/api/builtwith/v22/api.json`, {
-                        params: { LOOKUP: target }
+                        params: {
+                            KEY: import.meta.env.VITE_BUILTWITH_KEY || 'ea894525-80c8-4320-b284-44f5eb507593',
+                            LOOKUP: target
+                        }
                     })).catch(() => null);
 
                     let techRes = await fetchBW(domain);
