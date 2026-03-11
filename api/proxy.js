@@ -14,6 +14,11 @@ export default async function handler(req, res) {
     if (method === 'OPTIONS') return res.status(200).end();
 
     try {
+        // Clean up internal query params so they aren't sent to the target APIs
+        const cleanQuery = { ...req.query };
+        delete cleanQuery.service;
+        delete cleanQuery.path;
+
         if (service === 'scrape') {
             const { domain } = req.query;
             if (!domain) return res.status(400).json({ error: 'Domain is required' });
@@ -44,8 +49,9 @@ export default async function handler(req, res) {
             targetUrl = `https://zylalabs.com/${cleanPath}`;
             headers['Authorization'] = `Bearer ${process.env.VITE_ZYLALABS_KEY}`;
         } else if (service === 'builtwith') {
-            const key = process.env.VITE_BUILTWITH_KEY;
-            targetUrl = `https://api.builtwith.com/${path}&KEY=${key}`;
+            targetUrl = `https://api.builtwith.com/${path}`;
+            // Inject the key into the query params
+            cleanQuery.KEY = process.env.VITE_BUILTWITH_KEY;
         }
 
         const response = await axios({
@@ -53,7 +59,7 @@ export default async function handler(req, res) {
             url: targetUrl,
             headers,
             data: body,
-            params: req.query
+            params: cleanQuery // Use the cleaned params here
         });
 
         return res.status(200).json(response.data);
