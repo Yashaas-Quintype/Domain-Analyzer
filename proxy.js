@@ -50,7 +50,6 @@ export default async function handler(req, res) {
             headers['Authorization'] = `Bearer ${process.env.VITE_ZYLALABS_KEY}`;
         } else if (service === 'builtwith') {
             targetUrl = `https://api.builtwith.com/${path}`;
-            // Inject the key into the query params
             cleanQuery.KEY = process.env.VITE_BUILTWITH_KEY;
         }
 
@@ -59,7 +58,7 @@ export default async function handler(req, res) {
             url: targetUrl,
             headers,
             data: body,
-            params: cleanQuery // Use the cleaned params here
+            params: cleanQuery
         });
 
         return res.status(200).json(response.data);

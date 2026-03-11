@@ -79,6 +79,16 @@ const BulkAnalyzer = () => {
         return new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(num);
     };
 
+    const getRoot = (d) => {
+        const cleaned = d.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
+        const parts = cleaned.split('.');
+        if (parts.length <= 2) return cleaned;
+        const multiPartTlds = ['co.uk', 'org.uk', 'me.uk', 'net.uk', 'com.au', 'net.au', 'org.au', 'co.in', 'net.in', 'org.in'];
+        const lastTwo = parts.slice(-2).join('.');
+        if (multiPartTlds.includes(lastTwo) && parts.length > 2) return parts.slice(-3).join('.');
+        return parts.slice(-2).join('.');
+    };
+
     const processBulk = async () => {
         const domainList = parseDomains(input);
         if (domainList.length === 0) return;
@@ -90,24 +100,22 @@ const BulkAnalyzer = () => {
         setExpandedDomains(new Set());
 
         const BATCH_SIZE = 5;
-        const BATCH_DELAY = 500; // 0.5s between batches
+        const BATCH_DELAY = 500;
 
         for (let i = 0; i < domainList.length; i += BATCH_SIZE) {
             const batch = domainList.slice(i, i + BATCH_SIZE);
             const batchResults = {};
 
-            // Initialize status for this batch locally
             batch.forEach(domain => {
                 batchResults[domain] = { domain, visits: 'Loading...', tech: 'Loading...', status: 'processing' };
             });
 
-            // Single update for initial batch status
             setResults(prev => ({ ...prev, ...batchResults }));
 
             await Promise.all(batch.map(async (domain) => {
                 try {
                     const tryFetchTraffic = async (target) => {
-                        const normalized = target.replace(/^www\\./i, '');
+                        const normalized = target.replace(/^www\./i, '');
                         return withRetry(() => axios.get(`/api/zyla/api/29/site+traffic+api/93/traffic+source+and+overview`, {
                             params: { domain: normalized },
                             headers: { 'Authorization': `Bearer ${import.meta.env.VITE_ZYLALABS_KEY || '10095|mmrDs2Whvlc7fD1JKYF2CasMOSaDUZxnVkqhHEzp'}` },
@@ -120,16 +128,6 @@ const BulkAnalyzer = () => {
 
                     let trafficRes = await tryFetchTraffic(domain);
                     const hasTraffic = (r) => !!(r?.data && (r.data.Engagments || r.data.EstimatedMonthlyVisits));
-
-                    const getRoot = (d) => {
-                        const cleaned = d.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
-                        const parts = cleaned.split('.');
-                        if (parts.length <= 2) return cleaned;
-                        const multiPartTlds = ['co.uk', 'org.uk', 'me.uk', 'net.uk', 'com.au', 'net.au', 'org.au', 'co.in', 'net.in', 'org.in'];
-                        const lastTwo = parts.slice(-2).join('.');
-                        if (multiPartTlds.includes(lastTwo) && parts.length > 2) return parts.slice(-3).join('.');
-                        return parts.slice(-2).join('.');
-                    };
 
                     // Root fallback for traffic
                     if (!hasTraffic(trafficRes) && domain.split('.').length > 2) {
@@ -172,7 +170,6 @@ const BulkAnalyzer = () => {
 
                     const techInfo = extractTechByType(techList);
 
-                    // Update local batch results
                     batchResults[domain] = {
                         domain,
                         visits: formatNumber(totalVisits),
@@ -190,7 +187,6 @@ const BulkAnalyzer = () => {
                     batchResults[domain] = { domain, status: 'error', tech: 'Failed', visits: 'Failed' };
                 }
 
-                // Partially update state as each domain finishes for visual feedback
                 setResults(prev => ({
                     ...prev,
                     [domain]: batchResults[domain]
@@ -215,7 +211,6 @@ const BulkAnalyzer = () => {
             return `"${escaped}"`;
         };
 
-        // Get all unique months across all results for headers
         const allMonths = new Set();
         domains.forEach(d => {
             if (results[d]?.history) {
@@ -236,9 +231,7 @@ const BulkAnalyzer = () => {
             headers.join(','),
             ...domains.map(d => {
                 const res = results[d] || {};
-
-                // Extract separate CMS and CDN for the row
-                const rawTech = res.rawTech || []; // Need to make sure rawTech is stored
+                const rawTech = res.rawTech || [];
                 const cmsList = rawTech.filter(t => (t.Tag || '').toLowerCase().includes('cms')).map(t => t.Name);
                 const cdnList = rawTech.filter(t => {
                     const cat = (t.Tag || '').toLowerCase();
@@ -246,7 +239,6 @@ const BulkAnalyzer = () => {
                     return cat.includes('cdn') || name.includes('content delivery network');
                 }).map(t => t.Name);
 
-                // Map monthly visits
                 const monthViews = sortedMonths.map(month => {
                     const match = res.history?.find(h => h.date === month);
                     return match ? match.count : 'N/A';
