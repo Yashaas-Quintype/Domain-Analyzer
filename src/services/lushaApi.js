@@ -10,7 +10,6 @@ const cleanDomainForSearch = (domain) => {
         .replace(/\/(.*)$/, '')
         .trim();
 
-    // Remove common legal suffixes and the user's mentioned typo 'limted'
     const variant = cleaned.replace(/(limited|ltd|inc|corp|corporation|llc|plc|gmbh|limted)(\.[a-z]{2,}(\.[a-z]{2})?)$/i, '$2');
 
     return variant;
@@ -127,25 +126,45 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
             return { contacts: [], requestId, companyInfo: { name: companyName || 'Unknown Company', domain: domain } };
         }
 
-        // --- FILTERS (HR, Marketing, Finance) ---
+        // --- STRICT FILTERS (EXCLUDE HR, Marketing, Finance AND Sales) ---
         const EXCLUDED_DEPARTMENTS = [
             'human resources', 'hr', 'people operations', 'talent acquisition', 'recruiting', 'recruitment', 'people & culture',
             'marketing', 'brand', 'communications', 'public relations', 'pr', 'content', 'social media', 'growth marketing', 'demand generation',
-            'finance', 'financial', 'accounting', 'financial planning', 'fp&a', 'treasury', 'accounts payable', 'accounts receivable', 'bookkeeping', 'audit', 'tax', 'controller', 'revenue operations', 'billing', 'payroll'
+            'finance', 'financial', 'accounting', 'financial planning', 'fp&a', 'treasury', 'accounts payable', 'accounts receivable', 'bookkeeping', 'audit', 'tax', 'controller', 'revenue operations', 'billing', 'payroll',
+            // --- SALES EXCLUSIONS ---
+            'sales', 'business development', 'account management', 'customer success', 'sales operations', 'retail', 'inside sales', 'outside sales', 'lead generation'
         ];
 
         const EXCLUDED_TITLE_KEYWORDS = [
             'hr ', 'human resource', 'recruiter', 'talent', 'people ops', 'people partner', 'people & culture',
             'marketing', 'brand manager', 'social media', 'content manager', 'public relations', 'communications manager', 'growth hacker', 'demand gen', 'campaign manager',
-            'finance', 'financial', 'accountant', 'accounting', 'treasurer', 'bookkeeper', 'auditor', 'tax manager', 'tax director', 'controller', 'cfo', 'chief financial', 'fp&a', 'revenue operations', 'billing manager', 'payroll', 'head of finance', 'vp finance', 'director of finance'
+            'finance', 'financial', 'accountant', 'accounting', 'treasurer', 'bookkeeper', 'auditor', 'tax manager', 'tax director', 'controller', 'cfo', 'chief financial', 'fp&a', 'revenue operations', 'billing manager', 'payroll', 'head of finance', 'vp finance', 'director of finance',
+            // --- SALES TITLE EXCLUSIONS ---
+            'sales', 'account executive', 'account manager', 'business development', 'biz dev', 'customer success', 'customer experience', 'retail', 'sales associate', 'growth manager', 'partnership manager', 'leads'
+        ];
+
+        // --- ALLOWED DEPARTMENTS (STRICT INCLUSION) ---
+        const ALLOWED_KEYWORDS = [
+            'technical', 'information technology', 'it ', 'engineering', 'software', 'cto', 'developer',
+            'product', 'infrastructure', 'security', 'data', 'analytics', 'systems', 'management', 'managing director', 'founder', 'ceo', 'coo', 'vp engineer'
         ];
 
         const isExcluded = (contact) => {
             const depts = (contact.departments || []).map(d => (typeof d === 'string' ? d : d?.name || '').toLowerCase());
             const title = (contact.jobTitle || '').toLowerCase();
+            
             const deptMatch = depts.some(d => EXCLUDED_DEPARTMENTS.some(ex => d.includes(ex)));
             const titleMatch = EXCLUDED_TITLE_KEYWORDS.some(kw => title.includes(kw));
-            return deptMatch || titleMatch;
+
+            // If it's excluded by keyword, drop it
+            if (deptMatch || titleMatch) return true;
+
+            // Strict check: Must have at least one allowed keyword or it is considered irrelevant
+            const isAllowed = ALLOWED_KEYWORDS.some(kw => 
+                title.includes(kw) || depts.some(d => d.includes(kw))
+            );
+
+            return !isAllowed; // Exclude if NOT allowed
         };
 
         const relevantContacts = searchContacts.filter(c => !isExcluded(c));
@@ -170,11 +189,14 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
             .filter(item => item.isSuccess && item.data)
             .map(item => item.data)
             .filter(contact => {
+                // Secondary strict filter (Post-enrichment data)
                 if (isExcluded(contact)) return false;
+
                 const hasEmail = contact.emailAddresses && contact.emailAddresses.length > 0;
                 const hasPhone = contact.phoneNumbers && contact.phoneNumbers.length > 0;
                 const hasLinkedin = contact.socialLinks && contact.socialLinks.linkedin;
                 if (!(hasEmail || hasPhone || hasLinkedin)) return false;
+
                 if (isParent) return true;
                 const contactDomainObj = cleanDomainForMatch(contact.company?.fqdn || contact.fqdn);
                 const isFullMatch = contactDomainObj.full && (contactDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(contactDomainObj.full));
