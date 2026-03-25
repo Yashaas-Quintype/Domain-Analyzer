@@ -11,7 +11,6 @@ const cleanDomainForSearch = (domain) => {
         .trim();
 
     // Remove common legal suffixes and the user's mentioned typo 'limted'
-    // This allows us to find variants like 'breakingmedialimited.com' => 'breakingmedia.com'
     const variant = cleaned.replace(/(limited|ltd|inc|corp|corporation|llc|plc|gmbh|limted)(\.[a-z]{2,}(\.[a-z]{2})?)$/i, '$2');
 
     return variant;
@@ -120,7 +119,6 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
         const currentDomainOnly = domain ? domain.replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '') : '';
 
         if (variant && variant !== currentDomainOnly && variant.includes('.')) {
-            // Aggressive: Merging variants if we have few contacts or it's a parent search
             if (isParent || searchContacts.length < 25) {
                 console.log(`Checking cleaned domain variant: ${variant}`);
                 const variantResult = await performSearch(variant);
@@ -128,14 +126,12 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
                 if (variantResult.searchContacts.length > 0) {
                     const existingIds = new Set(searchContacts.map(c => c.contactId || c.id || c.personId));
                     const newContacts = variantResult.searchContacts.filter(c => !existingIds.has(c.contactId || c.id || c.personId));
-                    console.log(`Adding ${newContacts.length} contacts from variant: ${variant}`);
                     searchContacts = [...searchContacts, ...newContacts];
                     requestId = requestId || variantResult.requestId;
                 }
             }
         }
 
-        // Fallback 3: Search by Company Name if still no results
         if (searchContacts.length === 0 && companyName) {
             const nameResult = await performNameSearch(companyName);
             searchContacts = nameResult.searchContacts;
@@ -150,71 +146,58 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
             };
         }
 
-        // STEP 2: Enrich contacts
-        // Filter out irrelevant departments (HR, Marketing, Finance) before enrichment
+        // Exclusions
         const EXCLUDED_DEPARTMENTS = [
-            // HR
             'human resources', 'hr', 'people operations', 'talent acquisition',
             'recruiting', 'recruitment', 'people & culture', 'people and culture',
-            // Marketing
             'marketing', 'brand', 'communications', 'public relations', 'pr',
             'content', 'social media', 'growth marketing', 'demand generation',
-            // Finance
             'finance', 'financial', 'accounting', 'financial planning', 'fp&a',
             'treasury', 'accounts payable', 'accounts receivable', 'bookkeeping',
-            'audit', 'tax', 'controller', 'revenue operations', 'billing', 'payroll'
+            'audit', 'tax', 'controller', 'revenue operations', 'billing', 'payroll',
+            'sales', 'business development', 'account management'
         ];
 
         const EXCLUDED_TITLE_KEYWORDS = [
-            // HR
             'hr ', 'chief hr', 'human resource', 'recruiter', 'talent', 'people ops',
             'people partner', 'people & culture',
-            // Marketing
             'marketing', 'brand manager', 'social media', 'content manager',
-            'public relations', 'communications manager', 'growth hacker',
-            'demand gen', 'campaign manager',
-            // Finance
-            'finance', 'financial', 'accountant', 'accounting', 'treasurer',
-            'bookkeeper', 'auditor', 'tax manager', 'tax director',
-            'controller', 'cfo', 'chief financial', 'fp&a', 'revenue operations',
-            'billing manager', 'payroll', 'accounts payable', 'accounts receivable',
-            'head of finance', 'vp finance', 'director of finance'
+            'public relations', 'communications manager', 'growth hacker', 'demand gen',
+            'finance', 'financial', 'accountant', 'accounting', 'treasurer', 'bookkeeper',
+            'auditor', 'tax manager', 'tax director', 'controller', 'cfo', 'chief financial',
+            'fp&a', 'revenue operations', 'billing manager', 'payroll', 'accounts payable',
+            'accounts receivable', 'head of finance', 'vp finance', 'director of finance',
+            'sales', 'account manager', 'business development', 'account executive'
         ];
 
         const isExcluded = (contact) => {
             const depts = (contact.departments || []).map(d => (typeof d === 'string' ? d : d?.name || '').toLowerCase());
             const title = (contact.jobTitle || '').toLowerCase();
-
             const deptMatch = depts.some(d => EXCLUDED_DEPARTMENTS.some(ex => d.includes(ex)));
             const titleMatch = EXCLUDED_TITLE_KEYWORDS.some(kw => title.includes(kw));
-
             return deptMatch || titleMatch;
         };
 
-        const isEditor = (contact) => {
+        const isRelevantRole = (contact) => {
             const title = (contact.jobTitle || '').toLowerCase();
             const depts = (contact.departments || []).map(d => (typeof d === 'string' ? d : d?.name || '').toLowerCase());
 
-            // 1. Must have "editor" in title or department
-            const hasEditorKeyword = title.includes('editor') || depts.some(d => d.includes('editor'));
-            if (!hasEditorKeyword) return false;
+            // 1. Editorial Roles (Must be senior/ranking)
+            const isEditor = title.includes('editor') || depts.some(d => d.includes('editor'));
+            if (isEditor) {
+                const seniorKeywords = ['senior', 'chief', 'executive', 'managing', 'head', 'director', 'vp', 'lead', 'principal', 'founder'];
+                return seniorKeywords.some(kw => title.includes(kw));
+            }
 
-            // 2. Must be a senior ranking editor
-            const seniorKeywords = ['senior', 'chief', 'executive', 'managing', 'head', 'director', 'vp', 'lead', 'principal', 'founder'];
-            const isSeniorByTitle = seniorKeywords.some(kw => title.includes(kw));
+            // 2. Technical, IT, Engineering & General Management
+            const isTech = ['tech', 'it ', 'information technology', 'engineering', 'product', 'software', 'cto', 'information security', 'infrastructure'].some(kw => title.includes(kw) || depts.some(d => d.includes(kw)));
+            const isManagement = ['ceo', 'founder', 'owner', 'president', 'managing director', 'general manager', 'operations', 'md'].some(kw => title.includes(kw) || depts.some(d => d.includes(kw)));
 
-            // 3. Seniority level check (6=Senior, 7=Manager, 8=Director, 9=VP, 10=CXO)
-            const seniority = contact.seniority;
-            const isSeniorByLevel = seniority && (typeof seniority === 'number' ? seniority >= 6 : (seniority.value >= 6 || seniority.id >= 6));
-
-            return isSeniorByTitle || isSeniorByLevel;
+            return isTech || isManagement;
         };
 
-        const relevantContacts = searchContacts.filter(c => !isExcluded(c) && isEditor(c));
-        console.log(`Pre-enrich: Filtered ${searchContacts.length - relevantContacts.length} contacts. ${relevantContacts.length} Senior Editors remain.`);
-
+        const relevantContacts = searchContacts.filter(c => !isExcluded(c) && isRelevantRole(c));
         const contactIds = relevantContacts.map(c => c.contactId || c.id || c.personId).filter(id => id);
-        console.log(`Step 2: Enriching ${contactIds.length} contacts...`);
 
         const idsToEnrich = contactIds.slice(0, 15);
         const enrichResponse = await withRetry(() => axios.post(
@@ -234,57 +217,28 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
             onRetry: (count, delay) => onRetry?.(`Lusha Enrich (${count}/5)`, delay)
         });
 
-        // Process Enrich Response
         const enrichedContactsRaw = enrichResponse.data.contacts || [];
         const targetSearch = cleanDomainForMatch(domain);
-        console.log(`Step 2: Processing ${enrichedContactsRaw.length} enriched contacts for domain: ${domain}`);
 
-        // Map to flat structure and filter
         const finalContacts = enrichedContactsRaw
             .filter(item => item.isSuccess && item.data)
             .map(item => item.data)
             .filter(contact => {
-                // Second-pass exclusion/editor filter on enriched data
-                if (isExcluded(contact) || !isEditor(contact)) {
-                    console.log(`Post-enrich filtered: ${contact.fullName} — ${contact.jobTitle}`);
-                    return false;
-                }
-
-                // Must have some contact method
+                if (isExcluded(contact) || !isRelevantRole(contact)) return false;
                 const hasEmail = contact.emailAddresses && contact.emailAddresses.length > 0;
                 const hasPhone = contact.phoneNumbers && contact.phoneNumbers.length > 0;
                 const hasLinkedin = contact.socialLinks && contact.socialLinks.linkedin;
-
                 if (!(hasEmail || hasPhone || hasLinkedin)) return false;
-
-                // Lenient employment check
                 if (isParent) return true;
 
                 const contactDomainObj = cleanDomainForMatch(contact.company?.fqdn || contact.fqdn);
-
-                // Match if full domain matches OR base name matches (handles .com vs .in etc)
                 const isFullMatch = contactDomainObj.full && (contactDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(contactDomainObj.full));
-
-                // Extra lenient base name matching (handles esakal matching sakal)
                 const isBaseMatch = (contactDomainObj.base && targetSearch.base) &&
                     (contactDomainObj.base.includes(targetSearch.base) || targetSearch.base.includes(contactDomainObj.base));
-
-                const isMatch = isFullMatch || isBaseMatch;
-
-                if (!isMatch) {
-                    console.log(`Filtering out ${contact.fullName} - domain mismatch: ${contactDomainObj.full} vs ${targetSearch.full}`);
-                }
-                return isMatch;
+                return isFullMatch || isBaseMatch;
             });
 
-        console.log(`Filtered down to ${finalContacts.length} verified contacts.`);
-
-        // Extract company info from first enriched contact
-        let companyInfo = {
-            name: 'Unknown Company',
-            domain: domain
-        };
-
+        let companyInfo = { name: 'Unknown Company', domain: domain };
         if (finalContacts.length > 0) {
             const first = finalContacts[0];
             if (first.companyName) companyInfo.name = first.companyName;
@@ -292,12 +246,8 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
             if (cDomain) companyInfo.domain = cDomain.replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
         }
 
-        // STEP 3: Verify current employment status via LinkedIn
-        console.log(`Step 3: Verifying current employment for ${finalContacts.length} contacts...`);
-
         const verifyContact = async (contact) => {
             if (!contact.socialLinks || !contact.socialLinks.linkedin) return contact;
-
             try {
                 const personResponse = await withRetry(() => axios.get('/api/lusha/v2/person', {
                     params: { linkedinUrl: contact.socialLinks.linkedin },
@@ -306,44 +256,24 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
                     initialDelay: 1500,
                     onRetry: (count, delay) => onRetry?.(`Verify ${contact.fullName} (${count}/5)`, delay)
                 });
-
                 const personData = personResponse.data?.contact?.data;
-                if (!personData) {
-                    console.log(`No person data for ${contact.fullName}, keeping as potential.`);
-                    return contact;
-                }
-
-                if (isParent) return contact;
-
-                const currentCompany = personData.company;
-                const currentDomainObj = cleanDomainForMatch(currentCompany?.fqdn || currentCompany?.domain);
-
-                const isMatch = currentDomainObj.full && (currentDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(currentDomainObj.full)) ||
-                    (currentDomainObj.base && currentDomainObj.base === targetSearch.base);
-
-                if (!isMatch) {
-                    console.log(`Verification: ${contact.fullName} seems to be at ${currentDomainObj.full} now. Marking as probable.`);
+                if (!personData || isParent) return contact;
+                const currentDomainObj = cleanDomainForMatch(personData.company?.fqdn || personData.company?.domain);
+                if (!(currentDomainObj.full && (currentDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(currentDomainObj.full)) ||
+                    (currentDomainObj.base && currentDomainObj.base === targetSearch.base))) {
                     contact.probableFormer = true;
                 }
-
                 return contact;
-            } catch (error) {
-                console.warn(`Verification error for ${contact.fullName}:`, error.message);
-                return contact; // Keep contact anyway
-            }
+            } catch (error) { return contact; }
         };
 
-        const BATCH_SIZE = 2;
         const verifiedCurrentEmployees = [];
-
-        for (let i = 0; i < finalContacts.length; i += BATCH_SIZE) {
-            const batch = finalContacts.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < finalContacts.length; i += 2) {
+            const batch = finalContacts.slice(i, i + 2);
             const batchResults = await Promise.all(batch.map(contact => verifyContact(contact)));
             batchResults.forEach(result => { if (result) verifiedCurrentEmployees.push(result); });
-            if (i + BATCH_SIZE < finalContacts.length) await new Promise(r => setTimeout(r, 1000));
+            if (i + 2 < finalContacts.length) await new Promise(r => setTimeout(r, 1000));
         }
-
-        console.log(`Final Result: ${verifiedCurrentEmployees.length} verified current employees.`);
 
         return {
             contacts: verifiedCurrentEmployees,
