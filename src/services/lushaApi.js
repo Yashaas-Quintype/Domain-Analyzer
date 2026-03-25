@@ -105,24 +105,20 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
     try {
         let { searchContacts, requestId } = await performSearch(domain);
 
-        // Fallback 1: Root domain if subdomain search yielded nothing
+        // Fallback 1: Root domain
         if (searchContacts.length === 0 && domain && domain.split('.').length > 2) {
             const root = domain.split('.').slice(-2).join('.');
-            console.log(`No contacts for ${domain}, checking root: ${root}`);
             const rootResult = await performSearch(root);
             searchContacts = rootResult.searchContacts;
             requestId = rootResult.requestId || requestId;
         }
 
-        // Fallback 2: Cleaned domain variant (removes 'limited', etc.)
+        // Fallback 2: Cleaned domain variant
         const variant = cleanDomainForSearch(domain);
         const currentDomainOnly = domain ? domain.replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '') : '';
-
         if (variant && variant !== currentDomainOnly && variant.includes('.')) {
             if (isParent || searchContacts.length < 25) {
-                console.log(`Checking cleaned domain variant: ${variant}`);
                 const variantResult = await performSearch(variant);
-
                 if (variantResult.searchContacts.length > 0) {
                     const existingIds = new Set(searchContacts.map(c => c.contactId || c.id || c.personId));
                     const newContacts = variantResult.searchContacts.filter(c => !existingIds.has(c.contactId || c.id || c.personId));
@@ -140,78 +136,55 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
 
         if (searchContacts.length === 0) {
             return {
-                contacts: [],
-                requestId,
-                companyInfo: { name: companyName || 'Unknown Company', domain: domain }
+                contacts: [], requestId, companyInfo: { name: companyName || 'Unknown Company', domain: domain }
             };
         }
 
         // Exclusions
         const EXCLUDED_DEPARTMENTS = [
             'human resources', 'hr', 'people operations', 'talent acquisition',
-            'recruiting', 'recruitment', 'people & culture', 'people and culture',
-            'marketing', 'brand', 'communications', 'public relations', 'pr',
-            'content', 'social media', 'growth marketing', 'demand generation',
-            'finance', 'financial', 'accounting', 'financial planning', 'fp&a',
-            'treasury', 'accounts payable', 'accounts receivable', 'bookkeeping',
-            'audit', 'tax', 'controller', 'revenue operations', 'billing', 'payroll',
-            'sales', 'business development', 'account management'
+            'marketing', 'brand', 'communications', 'public relations', 'content',
+            'finance', 'accounting', 'controller', 'payroll', 'sales', 'business development'
         ];
 
         const EXCLUDED_TITLE_KEYWORDS = [
-            'hr ', 'chief hr', 'human resource', 'recruiter', 'talent', 'people ops',
-            'people partner', 'people & culture',
-            'marketing', 'brand manager', 'social media', 'content manager',
-            'public relations', 'communications manager', 'growth hacker', 'demand gen',
-            'finance', 'financial', 'accountant', 'accounting', 'treasurer', 'bookkeeper',
-            'auditor', 'tax manager', 'tax director', 'controller', 'cfo', 'chief financial',
-            'fp&a', 'revenue operations', 'billing manager', 'payroll', 'accounts payable',
-            'accounts receivable', 'head of finance', 'vp finance', 'director of finance',
-            'sales', 'account manager', 'business development', 'account executive'
+            'hr ', 'recruiter', 'talent', 'marketing', 'social media', 'pr manager',
+            'public relations', 'finance', 'accountant', 'controller', 'sales', 'account manager'
         ];
 
         const isExcluded = (contact) => {
             const depts = (contact.departments || []).map(d => (typeof d === 'string' ? d : d?.name || '').toLowerCase());
             const title = (contact.jobTitle || '').toLowerCase();
-            const deptMatch = depts.some(d => EXCLUDED_DEPARTMENTS.some(ex => d.includes(ex)));
-            const titleMatch = EXCLUDED_TITLE_KEYWORDS.some(kw => title.includes(kw));
-            return deptMatch || titleMatch;
+            return depts.some(d => EXCLUDED_DEPARTMENTS.some(ex => d.includes(ex))) || EXCLUDED_TITLE_KEYWORDS.some(kw => title.includes(kw));
         };
 
-        const isRelevantRole = (contact) => {
+        const isSeniorEditor = (contact) => {
             const title = (contact.jobTitle || '').toLowerCase();
             const depts = (contact.departments || []).map(d => (typeof d === 'string' ? d : d?.name || '').toLowerCase());
+            if (!(title.includes('editor') || depts.some(d => d.includes('editor')))) return false;
+            return ['senior', 'chief', 'executive', 'managing', 'head', 'director', 'vp', 'lead', 'principal', 'founder'].some(kw => title.includes(kw));
+        };
 
-            // 1. Editorial Roles (Must be senior/ranking)
-            const isEditor = title.includes('editor') || depts.some(d => d.includes('editor'));
-            if (isEditor) {
-                const seniorKeywords = ['senior', 'chief', 'executive', 'managing', 'head', 'director', 'vp', 'lead', 'principal', 'founder'];
-                return seniorKeywords.some(kw => title.includes(kw));
-            }
-
-            // 2. Technical, IT, Engineering & General Management
-            const isTech = ['tech', 'it ', 'information technology', 'engineering', 'product', 'software', 'cto', 'information security', 'infrastructure'].some(kw => title.includes(kw) || depts.some(d => d.includes(kw)));
+        const isTechOrManagement = (contact) => {
+            const title = (contact.jobTitle || '').toLowerCase();
+            const depts = (contact.departments || []).map(d => (typeof d === 'string' ? d : d?.name || '').toLowerCase());
+            const isTech = ['tech', 'it ', 'information technology', 'engineering', 'product', 'software', 'cto', 'information security'].some(kw => title.includes(kw) || depts.some(d => d.includes(kw)));
             const isManagement = ['ceo', 'founder', 'owner', 'president', 'managing director', 'general manager', 'operations', 'md'].some(kw => title.includes(kw) || depts.some(d => d.includes(kw)));
-
             return isTech || isManagement;
         };
 
-        const relevantContacts = searchContacts.filter(c => !isExcluded(c) && isRelevantRole(c));
-        const contactIds = relevantContacts.map(c => c.contactId || c.id || c.personId).filter(id => id);
+        // Prioritization logic: Tech/Mgmt first, then Editors
+        const techContacts = searchContacts.filter(c => !isExcluded(c) && isTechOrManagement(c));
+        const editorContacts = searchContacts.filter(c => !isExcluded(c) && isSeniorEditor(c) && !isTechOrManagement(c));
+        const relevantContacts = [...techContacts, ...editorContacts];
 
+        const contactIds = relevantContacts.map(c => c.contactId || c.id || c.personId).filter(id => id);
         const idsToEnrich = contactIds.slice(0, 15);
+
         const enrichResponse = await withRetry(() => axios.post(
             '/api/lusha/prospecting/contact/enrich',
-            {
-                requestId: requestId,
-                contactIds: idsToEnrich
-            },
-            {
-                headers: {
-                    'api_key': LUSHA_API_KEY,
-                    'Content-Type': 'application/json'
-                }
-            }
+            { requestId, contactIds: idsToEnrich },
+            { headers: { 'api_key': LUSHA_API_KEY, 'Content-Type': 'application/json' } }
         ), {
             initialDelay: 2000,
             onRetry: (count, delay) => onRetry?.(`Lusha Enrich (${count}/5)`, delay)
@@ -224,18 +197,12 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
             .filter(item => item.isSuccess && item.data)
             .map(item => item.data)
             .filter(contact => {
-                if (isExcluded(contact) || !isRelevantRole(contact)) return false;
-                const hasEmail = contact.emailAddresses && contact.emailAddresses.length > 0;
-                const hasPhone = contact.phoneNumbers && contact.phoneNumbers.length > 0;
-                const hasLinkedin = contact.socialLinks && contact.socialLinks.linkedin;
-                if (!(hasEmail || hasPhone || hasLinkedin)) return false;
+                if (isExcluded(contact) || !(isTechOrManagement(contact) || isSeniorEditor(contact))) return false;
+                if (!(contact.emailAddresses?.length > 0 || contact.phoneNumbers?.length > 0 || contact.socialLinks?.linkedin)) return false;
                 if (isParent) return true;
-
                 const contactDomainObj = cleanDomainForMatch(contact.company?.fqdn || contact.fqdn);
-                const isFullMatch = contactDomainObj.full && (contactDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(contactDomainObj.full));
-                const isBaseMatch = (contactDomainObj.base && targetSearch.base) &&
-                    (contactDomainObj.base.includes(targetSearch.base) || targetSearch.base.includes(contactDomainObj.base));
-                return isFullMatch || isBaseMatch;
+                return (contactDomainObj.full && (contactDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(contactDomainObj.full))) ||
+                       (contactDomainObj.base && targetSearch.base && contactDomainObj.base.includes(targetSearch.base));
             });
 
         let companyInfo = { name: 'Unknown Company', domain: domain };
@@ -247,20 +214,16 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
         }
 
         const verifyContact = async (contact) => {
-            if (!contact.socialLinks || !contact.socialLinks.linkedin) return contact;
+            if (!contact.socialLinks?.linkedin) return contact;
             try {
                 const personResponse = await withRetry(() => axios.get('/api/lusha/v2/person', {
                     params: { linkedinUrl: contact.socialLinks.linkedin },
                     headers: { 'api_key': LUSHA_API_KEY }
-                }), {
-                    initialDelay: 1500,
-                    onRetry: (count, delay) => onRetry?.(`Verify ${contact.fullName} (${count}/5)`, delay)
-                });
+                }), { initialDelay: 1500 });
                 const personData = personResponse.data?.contact?.data;
                 if (!personData || isParent) return contact;
-                const currentDomainObj = cleanDomainForMatch(personData.company?.fqdn || personData.company?.domain);
-                if (!(currentDomainObj.full && (currentDomainObj.full.includes(targetSearch.full) || targetSearch.full.includes(currentDomainObj.full)) ||
-                    (currentDomainObj.base && currentDomainObj.base === targetSearch.base))) {
+                const curDomain = cleanDomainForMatch(personData.company?.fqdn || personData.company?.domain);
+                if (!(curDomain.full && (curDomain.full.includes(targetSearch.full) || targetSearch.full.includes(curDomain.full)) || (curDomain.base === targetSearch.base))) {
                     contact.probableFormer = true;
                 }
                 return contact;
@@ -271,15 +234,11 @@ export const searchDecisionMakers = async (domain, { onRetry = null, isParent = 
         for (let i = 0; i < finalContacts.length; i += 2) {
             const batch = finalContacts.slice(i, i + 2);
             const batchResults = await Promise.all(batch.map(contact => verifyContact(contact)));
-            batchResults.forEach(result => { if (result) verifiedCurrentEmployees.push(result); });
+            batchResults.forEach(r => { if (r) verifiedCurrentEmployees.push(r); });
             if (i + 2 < finalContacts.length) await new Promise(r => setTimeout(r, 1000));
         }
 
-        return {
-            contacts: verifiedCurrentEmployees,
-            requestId: enrichResponse.data.requestId || requestId,
-            companyInfo
-        };
+        return { contacts: verifiedCurrentEmployees, requestId: enrichResponse.data.requestId || requestId, companyInfo };
 
     } catch (err) {
         console.error("Lusha API Error:", err);
