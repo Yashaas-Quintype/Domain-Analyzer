@@ -130,6 +130,7 @@ const BulkAnalyzer = () => {
                     let trafficRes = await tryFetchTraffic(domain);
                     const hasTraffic = (r) => !!(r?.data && (r.data.Engagments || r.data.EstimatedMonthlyVisits));
 
+                    // Root fallback for traffic
                     if (!hasTraffic(trafficRes) && domain.split('.').length > 2) {
                         const root = getRoot(domain);
                         const rootRes = await tryFetchTraffic(root);
@@ -145,6 +146,7 @@ const BulkAnalyzer = () => {
 
                     let techRes = await fetchBW(domain);
 
+                    // Root fallback for BuiltWith in bulk mode
                     if (!techRes?.data?.Results?.[0] && domain.split('.').length > 2) {
                         const root = getRoot(domain);
                         techRes = await fetchBW(root);
@@ -164,6 +166,11 @@ const BulkAnalyzer = () => {
                         count: formatNumber(visitsData[date])
                     }));
 
+                    const last3MonthsRaw = dates.slice(0, 3).map(date => ({
+                        date,
+                        count: visitsData[date] || 0
+                    }));
+
                     const techList = techRes?.data?.Results?.[0]?.Result?.Paths?.flatMap(p => p.Technologies) ||
                         techRes?.data?.Results?.[0]?.Result?.Technologies || [];
 
@@ -173,7 +180,9 @@ const BulkAnalyzer = () => {
                         domain,
                         visits: formatNumber(totalVisits),
                         pageViews: formatNumber(pageViews),
+                        rawPageViews: pageViews || 0,
                         history: last3Months,
+                        rawHistory: last3MonthsRaw,
                         cms: techInfo.cms,
                         cdn: techInfo.cdn,
                         fullTech: processTech(techList),
@@ -230,6 +239,14 @@ const BulkAnalyzer = () => {
             headers.join(','),
             ...domains.map(d => {
                 const res = results[d] || {};
+                const rawTech = res.rawTech || [];
+                const cmsList = rawTech.filter(t => (t.Tag || '').toLowerCase().includes('cms')).map(t => t.Name);
+                const cdnList = rawTech.filter(t => {
+                    const cat = (t.Tag || '').toLowerCase();
+                    const name = (t.Name || '').toLowerCase();
+                    return cat.includes('cdn') || name.includes('content delivery network');
+                }).map(t => t.Name);
+
                 const monthViews = sortedMonths.map(month => {
                     const match = res.history?.find(h => h.date === month);
                     return match ? match.count : 'N/A';
@@ -239,8 +256,8 @@ const BulkAnalyzer = () => {
                     escapeCSV(d),
                     ...monthViews.map(v => escapeCSV(v)),
                     escapeCSV(res.pageViews || 'N/A'),
-                    escapeCSV(res.cms || 'None'),
-                    escapeCSV(res.cdn || 'None')
+                    escapeCSV([...new Set(cmsList)].slice(0, 2).join(', ')),
+                    escapeCSV([...new Set(cdnList)].slice(0, 2).join(', '))
                 ].join(',');
             })
         ];
@@ -248,6 +265,7 @@ const BulkAnalyzer = () => {
         const csvString = csvRows.join('\n');
         const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
+
         const link = document.createElement("a");
         link.setAttribute("href", url);
         link.setAttribute("download", `bulk_analysis_${new Date().toISOString().slice(0, 10)}.csv`);
@@ -277,17 +295,25 @@ const BulkAnalyzer = () => {
 
         const rows = domains.map(d => {
             const res = results[d] || {};
+            const rawTech = res.rawTech || [];
+            const cmsList = rawTech.filter(t => (t.Tag || '').toLowerCase().includes('cms')).map(t => t.Name);
+            const cdnList = rawTech.filter(t => {
+                const cat = (t.Tag || '').toLowerCase();
+                const name = (t.Name || '').toLowerCase();
+                return cat.includes('cdn') || name.includes('content delivery network');
+            }).map(t => t.Name);
+
             const monthViews = sortedMonths.map(month => {
-                const match = res.history?.find(h => h.date === month);
-                return match ? match.count : 'N/A';
+                const match = res.rawHistory?.find(h => h.date === month);
+                return match ? match.count : 0;
             });
 
             return [
                 d,
                 ...monthViews,
-                res.pageViews || 'N/A',
-                res.cms || 'None',
-                res.cdn || 'None'
+                res.rawPageViews || 0,
+                [...new Set(cmsList)].slice(0, 2).join(', ') || 'None',
+                [...new Set(cdnList)].slice(0, 2).join(', ') || 'None'
             ];
         });
 
@@ -488,6 +514,9 @@ const BulkAnalyzer = () => {
                                                                         <div className="text-[10px] text-indigo-400 mb-1 uppercase font-black">Est. Page Views</div>
                                                                         <div className="text-sm font-bold text-indigo-300">{results[d].pageViews || 'N/A'}</div>
                                                                     </div>
+                                                                    {(!results[d].history || results[d].history.length === 0) && (
+                                                                        <div className="text-slate-600 italic text-xs">No historical data available</div>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                             <div>
@@ -513,7 +542,7 @@ const BulkAnalyzer = () => {
                     </div>
                 )}
             </div>
-        </div>
+        </div >
     );
 };
 
