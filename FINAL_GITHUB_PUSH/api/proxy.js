@@ -30,7 +30,7 @@ export default async function handler(req, res) {
             const { domain, strategy } = req.query;
             if (!domain || !strategy) return res.status(400).json({ error: 'domain and strategy are required' });
 
-            const key = process.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+            const key = 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
             const fields = 'loadingExperience,originLoadingExperience,lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
             const target = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${domain}/&key=${key}&category=performance&strategy=${strategy}&fields=${encodeURIComponent(fields)}`;
 

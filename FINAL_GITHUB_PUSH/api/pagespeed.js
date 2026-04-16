@@ -6,7 +6,7 @@ const PS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 function fetchPageSpeed(domain, strategy, timeoutMs = 58000) {
     return new Promise((resolve, reject) => {
-        const apiKey = process.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+        const apiKey = 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
         const fields = encodeURIComponent(
             'loadingExperience,originLoadingExperience,lighthouseResult.categories.performance.score,lighthouseResult.lighthouseVersion'
         );

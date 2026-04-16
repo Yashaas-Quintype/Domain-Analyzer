@@ -173,7 +173,7 @@ function App() {
         const runPageSpeedAudit = (targetDomain) => {
             setPageSpeedLoading(true);
             let psResolvedCount = 0;
-            const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+            const PSI_KEY = 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
             const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
 
             ['mobile', 'desktop'].forEach(type => {
@@ -394,7 +394,7 @@ function App() {
         setPageSpeedLoading(true);
         setPageSpeedStarted(true);
         let psResolvedCount = 0;
-        const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+        const PSI_KEY = 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
         const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
 
         ['mobile', 'desktop'].forEach(type => {
