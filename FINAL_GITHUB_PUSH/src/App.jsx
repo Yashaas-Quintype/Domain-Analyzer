@@ -177,11 +177,11 @@ function App() {
             const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
 
             ['mobile', 'desktop'].forEach(type => {
-                const runAudit = async (d) => {
+                const runAudit = async (domainToAudit) => {
                     const tryUrls = [
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        `/api/pagespeed?domain=${d}&strategy=${type}`
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${domainToAudit}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${domainToAudit}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        `/api/pagespeed?domain=${domainToAudit}&strategy=${type}`
                     ];
                     for (const url of tryUrls) {
                         try {
