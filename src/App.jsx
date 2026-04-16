@@ -1,64 +1,75 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import axios from 'axios';
-import { 
-    Users, 
-    Globe, 
-    Activity, 
-    Zap, 
-    ChevronDown, 
-    ChevronUp, 
-    Search,
-    ExternalLink,
-    Mail,
-    Phone,
-    Linkedin,
-    Building2,
-    Shield,
-    Smartphone,
-    Monitor,
-    BarChart3,
-    CheckCircle2,
-    AlertCircle,
-    Copy,
-    Share2,
-    Lock,
-    Eye
-} from 'lucide-react';
+import DecisionMakers from './components/DecisionMakers.jsx';
+import BulkAnalyzer from './components/BulkAnalyzer.jsx';
+import { searchDecisionMakers } from './services/lushaApi.js';
+import { scrapeLegal } from './services/legalScraper.js';
+import { withRetry } from './utils/apiRetry.js';
 
-// Custom utility to handle retries with exponential backoff
-const withRetry = async (fn, options = { maxRetries: 3, initialDelay: 1000 }) => {
-    let lastError;
-    for (let i = 0; i < options.maxRetries; i++) {
-        try {
-            return await fn();
-        } catch (error) {
-            lastError = error;
-            if (error.response?.status === 429) {
-                const delay = options.initialDelay * Math.pow(2, i) + Math.random() * 1000;
-                await new Promise(resolve => setTimeout(resolve, delay));
-                continue;
+// Helper to filter and categorize tech stack
+const processTech = (allTechnologies) => {
+    if (!allTechnologies || allTechnologies.length === 0) return null;
+
+    const threeMonthsInMs = 90 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const recentThreshold = now - threeMonthsInMs;
+
+    return allTechnologies
+        .filter(tech => tech.Name !== 'Content Delivery Network')
+        .sort((a, b) => (b.LastDetected || 0) - (a.LastDetected || 0))
+        .reduce((acc, tech) => {
+            let category = tech.Tag || 'Other';
+            const lowerCat = category.toLowerCase();
+            if (['content delivery network', 'cdns', 'cdn'].includes(lowerCat)) category = 'CDN';
+            if (!acc[category]) acc[category] = [];
+
+            const isRecent = tech.LastDetected && tech.LastDetected >= recentThreshold;
+
+            if (!acc[category].find(t => t.Name === tech.Name)) {
+                acc[category].push({ ...tech, isRecent });
             }
-            throw error;
-        }
+            return acc;
+        }, {});
+};
+
+const getDomainRoot = (hostname) => {
+    if (!hostname) return '';
+    const cleaned = hostname.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
+    const parts = cleaned.split('.');
+    if (parts.length <= 2) return cleaned;
+
+    const multiPartTlds = ['co.uk', 'org.uk', 'me.uk', 'net.uk', 'com.au', 'net.au', 'org.au', 'co.in', 'net.in', 'org.in'];
+    const lastTwo = parts.slice(-2).join('.');
+    if (multiPartTlds.includes(lastTwo) && parts.length > 2) {
+        return parts.slice(-3).join('.');
     }
-    throw lastError;
+
+    return parts.slice(-2).join('.');
 };
 
 function App() {
+    const activeSearchDomain = useRef('');
     const [domain, setDomain] = useState('');
     const [loading, setLoading] = useState(false);
-    const [data, setData] = useState(null);
-    const [scrapedCompany, setScrapedCompany] = useState(null);
-    const [techStack, setTechStack] = useState(null);
-    const [lushaData, setLushaData] = useState(null);
-    const [lushaRequested, setLushaRequested] = useState(false);
     const [error, setError] = useState(null);
-    const [searchHistory, setSearchHistory] = useState([]);
-    const [historyIndex, setHistoryIndex] = useState(-1);
-    const [activeTab, setActiveTab] = useState('single');
+    const [data, setData] = useState(null);
+    const [techStack, setTechStack] = useState(null);
     const [cache] = useState({});
-    
-    // PageSpeed Insight states
+    const [showAllTech, setShowAllTech] = useState(false);
+    const [showMonthlyVisits, setShowMonthlyVisits] = useState(false);
+    const [activeTab, setActiveTab] = useState('single');
+
+    // Lusha State
+    const [lushaData, setLushaData] = useState(null);
+    const [lushaLoading, setLushaLoading] = useState(false);
+    const [lushaError, setLushaError] = useState(null);
+    const [lushaRequested, setLushaRequested] = useState(false);
+
+    // Scraper State
+    const [scrapedCompany, setScrapedCompany] = useState(null);
+    const [scrapedLoading, setScrapedLoading] = useState(false);
+    const [redirectingParent, setRedirectingParent] = useState(null);
+    const [retryingStatus, setRetryingStatus] = useState(null);
     const [pageSpeedMobile, setPageSpeedMobile] = useState(null);
     const [pageSpeedDesktop, setPageSpeedDesktop] = useState(null);
     const [pageSpeedLoading, setPageSpeedLoading] = useState(false);
@@ -66,27 +77,11 @@ function App() {
     const [trafficLoading, setTrafficLoading] = useState(false);
     const [techLoading, setTechLoading] = useState(false);
     const [copied, setCopied] = useState(false);
-    const [lushaLoading, setLushaLoading] = useState(false);
 
-    // Ref to prevent race conditions on search
-    const activeSearchDomain = useRef(null);
-
-    // Initialize search history from localStorage
-    useEffect(() => {
-        const savedHistory = localStorage.getItem('searchHistory');
-        if (savedHistory) {
-            try {
-                setSearchHistory(JSON.parse(savedHistory));
-            } catch (e) {
-                console.error("Failed to parse history", e);
-            }
-        }
-    }, []);
-
-    // Save history to localStorage
-    useEffect(() => {
-        localStorage.setItem('searchHistory', JSON.stringify(searchHistory));
-    }, [searchHistory]);
+    // History State
+    const [searchHistory, setSearchHistory] = useState([]);
+    const [historyIndex, setHistoryIndex] = useState(-1);
+    const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
     // Helper to load a domain from history/cache
     const loadFromHistory = (index) => {
@@ -120,171 +115,275 @@ function App() {
 
     const addToHistory = (newDomain) => {
         const cleanDomain = newDomain.toLowerCase().trim();
-        setSearchHistory(prev => {
-            const filtered = prev.filter(d => d.toLowerCase().trim() !== cleanDomain);
-            const updated = [newDomain, ...filtered].slice(0, 10);
-            return updated;
-        });
-        setHistoryIndex(0);
+        // Don't add if it's the same as the current history item
+        if (historyIndex >= 0 && searchHistory[historyIndex].toLowerCase().trim() === cleanDomain) return;
+
+        const newHistory = [...searchHistory.slice(0, historyIndex + 1), newDomain];
+        setSearchHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
     };
 
     const handleAnalyze = async (e) => {
-        if (e) e.preventDefault();
+        e.preventDefault();
         if (!domain) return;
 
         const cleanSearch = domain.toLowerCase().trim();
-        const normalizedDomain = cleanSearch.replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
-        
-        // Reset everything for new search
+        if (cache[cleanSearch]) {
+            console.log("Serving from cache:", cleanSearch);
+            const cached = cache[cleanSearch];
+            setData(cached.traffic);
+            setTechStack(cached.tech);
+            setLushaData(cached.lusha);
+            setScrapedCompany(cached.scraped);
+            setPageSpeedMobile(cached.pageSpeed_mobile);
+            setPageSpeedDesktop(cached.pageSpeed_desktop);
+            setLushaRequested(!!cached.lusha);
+
+            addToHistory(domain);
+            return;
+        }
+
+        // Reset all loading/data state
+        setLoading(true);
         setError(null);
         setData(null);
         setTechStack(null);
-        setLushaData(null);
         setLushaRequested(false);
+        setLushaLoading(false);
+        setLushaError(null);
+        setLushaData(null);
+        setScrapedLoading(false);
         setScrapedCompany(null);
+        setRedirectingParent(null);
+        setRetryingStatus(null);
         setPageSpeedMobile(null);
         setPageSpeedDesktop(null);
-        
-        activeSearchDomain.current = normalizedDomain;
-        addToHistory(normalizedDomain);
-
-        setLoading(true);
-        setTrafficLoading(true);
-        setTechLoading(true);
         setPageSpeedLoading(true);
         setPageSpeedStarted(true);
-        
-        // Parallel fetching for performance
-        const fetchTraffic = async () => {
-            try {
-                const response = await withRetry(() => axios.get(`/api/zyla/api/29/site+traffic+api/93/traffic+source+and+overview`, {
-                    params: { domain: normalizedDomain }
-                }));
-                const trafficData = response.data;
-                setData(trafficData);
-                if (cache[cleanSearch]) cache[cleanSearch].traffic = trafficData;
-                return trafficData;
-            } catch (err) {
-                console.error("Traffic API failed:", err);
-                return null;
-            } finally {
-                setTrafficLoading(false);
-            }
-        };
+        setTrafficLoading(true);
+        setTechLoading(true);
 
-        const fetchTech = async () => {
-            try {
-                const response = await withRetry(() => axios.get(`/api/builtwith/v22/api.json`, {
-                    params: { 
-                        KEY: import.meta.env.VITE_BUILTWITH_KEY || 'ea894525-80c8-4320-b284-44f5eb507593',
-                        LOOKUP: normalizedDomain 
-                    }
-                }));
-                const techData = response.data.Results?.[0]?.Result?.Paths?.[0]?.Technologies || null;
-                setTechStack(techData);
-                if (cache[cleanSearch]) cache[cleanSearch].tech = techData;
-                return techData;
-            } catch (err) {
-                console.error("BuiltWith API failed:", err);
-                return null;
-            } finally {
-                setTechLoading(false);
-            }
-        };
+        // Set active domain for race condition handling
+        activeSearchDomain.current = domain;
+        cache[cleanSearch] = { traffic: null, tech: null, lusha: null, scraped: null };
 
-        const fetchScrape = async () => {
-            try {
-                const response = await axios.get(`/api/scrape?domain=${normalizedDomain}`);
-                setScrapedCompany(response.data);
-                if (cache[cleanSearch]) cache[cleanSearch].scraped = response.data;
-                return response.data;
-            } catch (err) {
-                console.error("Legal Scraper failed:", err);
-                return null;
-            }
-        };
+        const currentSearch = cleanSearch;
 
-        const runPageSpeedAudit = async () => {
-            const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || '';
-            const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
-            
+        // 0. PageSpeed Insights
+        const runPageSpeedAudit = (targetDomain) => {
+            setPageSpeedLoading(true);
             let psResolvedCount = 0;
+            const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+            const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
+
             ['mobile', 'desktop'].forEach(type => {
                 const runAudit = async (d) => {
                     const tryUrls = [
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        `[https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`](https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`),
+                        `[https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`](https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`),
                         `/api/pagespeed?domain=${d}&strategy=${type}`
                     ];
-
                     for (const url of tryUrls) {
                         try {
                             const res = await axios.get(url, { timeout: 45000 });
                             if (res.data?.lighthouseResult) return res.data;
                         } catch (e) { }
                     }
-                    return null;
+                    throw new Error('All PageSpeed attempts failed');
                 };
 
-                runAudit(normalizedDomain).then(data => {
-                    if (type === 'mobile') setPageSpeedMobile(data);
-                    else setPageSpeedDesktop(data);
-                    if (cache[cleanSearch]) cache[cleanSearch][`pageSpeed_${type}`] = data;
-                }).catch(e => console.error(e)).finally(() => {
-                    psResolvedCount++;
-                    if (psResolvedCount === 2) setPageSpeedLoading(false);
+                withRetry(() => runAudit(targetDomain), { maxRetries: 2, initialDelay: 1000 }).then(data => {
+                    if (activeSearchDomain.current === domain) {
+                        if (type === 'mobile') setPageSpeedMobile(data);
+                        else setPageSpeedDesktop(data);
+                        if (!cache[currentSearch]) cache[currentSearch] = {};
+                        cache[currentSearch][`pageSpeed_${type}`] = data;
+                    }
+                }).finally(() => {
+                    if (activeSearchDomain.current === domain) {
+                        psResolvedCount++;
+                        if (psResolvedCount === 2) setPageSpeedLoading(false);
+                    }
                 });
             });
         };
 
-        // Initialize cache for this search
-        cache[cleanSearch] = { traffic: null, tech: null, lusha: null, scraped: null };
+        const normalizedDomain = currentSearch.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+        runPageSpeedAudit(normalizedDomain);
 
-        // Execute all fetches
-        Promise.all([fetchTraffic(), fetchTech(), fetchScrape(), runPageSpeedAudit()])
-            .finally(() => {
-                setLoading(false);
+        // 1. Traffic API
+        const fetchTraffic = async (targetDomain) => {
+            const normalized = targetDomain.replace(/^www\./i, '');
+            return withRetry(() => axios.get(`/api/zyla/api/29/site+traffic+api/93/traffic+source+and+overview`, {
+                params: { domain: normalized },
+                headers: { 'Authorization': `Bearer ${import.meta.env.VITE_ZYLALABS_KEY || '10095|mmrDs2Whvlc7fD1JKYF2CasMOSaDUZxnVkqhHEzp'}` },
+                timeout: 25000
+            }), {
+                maxRetries: 3,
+                onRetry: (count) => setRetryingStatus(`Retrying Traffic API (${count}/3)...`)
             });
-    };
+        };
 
-    const handleRevealContacts = async () => {
-        if (lushaRequested || lushaLoading) return;
-        setLushaLoading(true);
-        setLushaRequested(true);
-        setError(null);
+        const hasTrafficData = (d) => !!(d && (d.Engagments || d.EstimatedMonthlyVisits));
 
-        try {
-            const normalizedDomain = domain.toLowerCase().trim().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
-            
-            // Try to use the scraped company name or parent website first for more accurate results
-            const searchCompany = scrapedCompany?.name || normalizedDomain;
-            const searchWebsite = normalizedDomain;
+        fetchTraffic(domain).then(async (res) => {
+            if (activeSearchDomain.current !== domain) return;
 
-            const response = await withRetry(() => axios.post('/api/lusha/v1/person/search', {
-                filters: {
-                    company_domain: [searchWebsite],
-                    // Prioritize specific technical/management roles
-                    job_title: ["Engineering", "Technology", "IT", "Technical", "Operations", "Managing Director", "VP", "Head of", "CTO", "CIO"]
+            let trafficData = res.data;
+
+            if (!hasTrafficData(trafficData) && domain.split('.').length > 2) {
+                const root = getDomainRoot(domain);
+                console.log(`No direct traffic found for ${domain}. Trying root: ${root}`);
+                try {
+                    const rootRes = await fetchTraffic(root);
+                    if (hasTrafficData(rootRes.data)) {
+                        trafficData = rootRes.data;
+                    }
+                } catch (e) {
+                    console.error("Root traffic fallback failed:", e);
                 }
-            }));
+            }
 
-            // Filter out non-current and irrelevant roles (e.g. Sales) if needed
-            const results = response.data?.data || [];
-            const filteredResults = {
-                ...response.data,
-                data: results.filter(p => !p.job_title?.toLowerCase().includes('sales'))
+            if (activeSearchDomain.current === domain) {
+                if (hasTrafficData(trafficData)) {
+                    setData(trafficData);
+                    cache[currentSearch].traffic = trafficData;
+                    setRetryingStatus(null);
+                } else {
+                    console.warn(`Zylalabs returned no traffic data for ${domain} or its root.`);
+                    setData(null);
+                }
+            }
+        }).catch(err => {
+            console.error("Traffic API failed:", err);
+            if (activeSearchDomain.current === domain) {
+                setData(null);
+                setRetryingStatus("Traffic data unavailable for this domain.");
+                setTimeout(() => setRetryingStatus(null), 5000);
+            }
+        }).finally(() => {
+            const currentRelevant = activeSearchDomain.current === domain ||
+                (cache[currentSearch]?.scraped?.potentialParentWebsites?.includes(activeSearchDomain.current));
+            if (currentRelevant) setTrafficLoading(false);
+        });
+
+        // 2. BuiltWith API
+        const fetchBuiltWith = async (targetDomain) => {
+            console.log(`Attempting BuiltWith lookup for: ${targetDomain}`);
+            return withRetry(() => axios.get(`/api/builtwith/v22/api.json`, {
+                params: {
+                    KEY: import.meta.env.VITE_BUILTWITH_KEY || 'ea894525-80c8-4320-b284-44f5eb507593',
+                    LOOKUP: targetDomain
+                }
+            }), {
+                onRetry: (count) => setRetryingStatus(`Retrying Tech Stack API (${count}/3)...`)
+            });
+        };
+
+        fetchBuiltWith(domain).then(async (res) => {
+            if (activeSearchDomain.current !== domain) return;
+
+            console.log("BuiltWith raw response:", res.data);
+            let results = res.data?.Results;
+
+            const getTechList = (resObj) => {
+                if (!resObj) return null;
+                const pathTechs = resObj.Result?.Paths?.flatMap(p => p.Technologies) || [];
+                const topLevelTechs = resObj.Result?.Technologies || [];
+                const combined = [...pathTechs, ...topLevelTechs];
+                return combined.length > 0 ? combined : null;
             };
 
-            setLushaData(filteredResults);
-            
-            const cleanSearch = domain.toLowerCase().trim();
-            if (cache[cleanSearch]) cache[cleanSearch].lusha = filteredResults;
+            let techList = getTechList(results?.[0]);
 
+            if (!techList && domain.split('.').length > 2) {
+                const root = getDomainRoot(domain);
+                console.log(`No data found for ${domain}. Retrying with root domain: ${root}`);
+                const rootRes = await fetchBuiltWith(root);
+                results = rootRes.data?.Results;
+                techList = getTechList(results?.[0]);
+            }
+
+            if (techList) {
+                const tech = processTech(techList);
+                setTechStack(tech);
+                cache[currentSearch].tech = tech;
+                setRetryingStatus(null);
+            } else {
+                console.warn(`BuiltWith returned no technology data for ${domain} or its root.`);
+                setTechStack(null);
+            }
+        }).catch(err => {
+            console.error("Tech Stack API failed:", err);
+            setTechStack(null);
+        }).finally(() => {
+            const currentRelevant = activeSearchDomain.current === domain ||
+                (cache[currentSearch]?.scraped?.potentialParentWebsites?.includes(activeSearchDomain.current));
+            if (currentRelevant) setTechLoading(false);
+        });
+
+        // Lusha is now manual - handled by handleLushaUnlock
+        setLoading(false);
+        addToHistory(domain);
+    };
+
+    const copyToSheets = async () => {
+        if (!domain || !data) return;
+
+        const cleanD = domain.toLowerCase().trim();
+
+        // 1. Get History (Last 3 months sorted - raw numbers)
+        const visitsData = data.EstimatedMonthlyVisits || {};
+        const sortedMonths = Object.keys(visitsData).sort((a, b) => new Date(b) - new Date(a)).slice(0, 3);
+        const monthViews = sortedMonths.map(m => visitsData[m] || 0);
+        while (monthViews.length < 3) monthViews.push(0);
+
+        // 2. Traffic Metrics (raw numbers)
+        const engagements = data.Engagments || {};
+        const totalVisitsCount = engagements.Visits ? parseInt(engagements.Visits, 10) : (sortedMonths.length > 0 ? visitsData[sortedMonths[0]] : 0);
+        const ppv = engagements.PagePerVisit ? parseFloat(engagements.PagePerVisit) : 1.5;
+        const pageViews = totalVisitsCount ? Math.round(totalVisitsCount * ppv) : 0;
+
+        // 3. Performance
+        const perfMobile = pageSpeedMobile?.lighthouseResult?.categories?.performance?.score ? Math.round(pageSpeedMobile.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
+        const perfDesktop = pageSpeedDesktop?.lighthouseResult?.categories?.performance?.score ? Math.round(pageSpeedDesktop.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
+
+        // 4. Extract CMS and CDN (Case-insensitive)
+        const findTechNames = (catName) => {
+            const entry = Object.entries(techStack || {}).find(([k]) => k.toLowerCase() === catName.toLowerCase());
+            return entry ? entry[1].map(t => t.Name).join(', ').replace(/\t|\n/g, ' ') : 'None';
+        };
+
+        const cms = findTechNames('cms');
+        const cdn = findTechNames('cdn');
+
+        const finalHeaders = [
+            'Domain',
+            ...(sortedMonths.length > 0 ? sortedMonths.map(m => `Visits (${m})`) : ['Visits (M1)', 'Visits (M2)', 'Visits (M3)']),
+            'Latest Page Views',
+            'CMS',
+            'CDN',
+            'Perf (Mob)',
+            'Perf (Desk)'
+        ];
+
+        const values = [
+            cleanD,
+            ...monthViews,
+            pageViews,
+            cms,
+            cdn,
+            perfMobile,
+            perfDesktop
+        ];
+
+        const tsvString = [finalHeaders.join('\t'), values.join('\t')].join('\n');
+        try {
+            await navigator.clipboard.writeText(tsvString);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
         } catch (err) {
-            console.error("Lusha API Error:", err);
-            setError(err.response?.status === 402 ? "Lusha Credit Limit Reached" : "Error retrieving contact details");
-        } finally {
-            setLushaLoading(false);
+            console.error('Failed to copy: ', err);
         }
     };
 
@@ -301,8 +400,8 @@ function App() {
         ['mobile', 'desktop'].forEach(type => {
             const runAudit = async (targetDomain) => {
                 const tryUrls = [
-                    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                    `[https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`](https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`),
+                    `[https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`](https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`),
                     `/api/pagespeed?domain=${targetDomain}&strategy=${type}&refresh=true`
                 ];
 
@@ -335,183 +434,379 @@ function App() {
         });
     };
 
-    const copyToClipboard = (text) => {
-        navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+    const handleLushaUnlock = async () => {
+        if (!domain || activeSearchDomain.current !== domain) return;
+        setLushaRequested(true);
+        setLushaLoading(true);
+        setLushaError(null);
+
+        const currentSearch = domain.toLowerCase().trim();
+
+        searchDecisionMakers(domain, {
+            onRetry: (status) => setRetryingStatus(`Retrying: ${status}`)
+        })
+            .then(async (lushaResults) => {
+                if (activeSearchDomain.current !== domain) return;
+
+                setLushaData(lushaResults);
+                cache[currentSearch].lusha = lushaResults;
+                setRetryingStatus(null);
+
+                if (!lushaResults || !lushaResults.contacts || lushaResults.contacts.length === 0) {
+                    setScrapedLoading(true);
+
+                    try {
+                        let scraperData = null;
+
+                        const cleanD = domain.toLowerCase().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
+                        const KB = {
+                            'footballinsider247.com': { name: 'Breaking Media Ltd', potentialParentWebsites: ['breakingmedialimited.com', 'breakingmedia.com', 'breakingmedialimted.com', 'grv.media'] },
+                            'footballinsider.co.uk': { name: 'Breaking Media Ltd', potentialParentWebsites: ['breakingmedialimited.com', 'breakingmedia.com', 'breakingmedialimted.com', 'grv.media'] },
+                            'abovethelaw.com': { name: 'Breaking Media, Inc.', potentialParentWebsites: ['breakingmedia.com', 'breakingmedialimited.com'] },
+                            'fashionista.com': { name: 'The Arena Group', potentialParentWebsites: ['thearenagroup.net', 'arenagroup.com'] },
+                            'dealbreaker.com': { name: 'Breaking Media', potentialParentWebsites: ['breakingmedia.com', 'breakingmedialimited.com'] },
+                            'medcitynews.com': { name: 'Breaking Media', potentialParentWebsites: ['breakingmedia.com', 'breakingmedialimited.com'] },
+                            'breakingdefense.com': { name: 'Breaking Media', potentialParentWebsites: ['breakingmedia.com', 'breakingmedialimited.com'] },
+                            'westhamzone.com': { name: 'Breaking Media Ltd', potentialParentWebsites: ['breakingmedialimited.com', 'breakingmedia.com', 'breakingmedialimted.com'] }
+                        };
+
+                        if (KB[cleanD]) {
+                            scraperData = { ...KB[cleanD], parentWebsite: KB[cleanD].potentialParentWebsites[0] };
+                        } else {
+                            try {
+                                const res = await axios.get('/api/scrape', { params: { domain }, timeout: 5000 });
+                                scraperData = res.data;
+                            } catch (e) {
+                                scraperData = await scrapeLegal(domain);
+                            }
+                        }
+
+                        if (scraperData) {
+                            setScrapedCompany(scraperData);
+                            cache[currentSearch].scraped = scraperData;
+
+                            if (scraperData.potentialParentWebsites && scraperData.potentialParentWebsites.length > 0) {
+                                const parents = scraperData.potentialParentWebsites;
+                                for (const parent of parents) {
+                                    if (activeSearchDomain.current !== domain && !parents.includes(activeSearchDomain.current)) break;
+                                    if (parent.toLowerCase() === domain.toLowerCase()) continue;
+
+                                    setRedirectingParent(parent);
+                                    activeSearchDomain.current = parent;
+                                    setLushaLoading(true);
+
+                                    try {
+                                        const parentLushaResults = await searchDecisionMakers(parent, {
+                                            onRetry: (status) => setRetryingStatus(`Retrying Parent (${parent}): ${status}`),
+                                            isParent: true,
+                                            companyName: scraperData.name
+                                        });
+
+                                        if (parentLushaResults && parentLushaResults.contacts && parentLushaResults.contacts.length > 0) {
+                                            if (activeSearchDomain.current === parent) {
+                                                setLushaData(parentLushaResults);
+                                                cache[currentSearch].lusha = parentLushaResults;
+                                                scraperData.parentWebsite = parent;
+                                                setScrapedCompany(scraperData);
+                                                break;
+                                            }
+                                        }
+                                    } catch (e) { }
+                                }
+                            }
+
+                            const currentLushaData = cache[currentSearch].lusha;
+                            if ((!currentLushaData || !currentLushaData.contacts || currentLushaData.contacts.length === 0) && scraperData.name) {
+                                setRedirectingParent(`Name: ${scraperData.name}`);
+                                setLushaLoading(true);
+
+                                try {
+                                    const nameResults = await searchDecisionMakers(null, {
+                                        isParent: true,
+                                        companyName: scraperData.name
+                                    });
+
+                                    if (nameResults && nameResults.contacts && nameResults.contacts.length > 0) {
+                                        if (activeSearchDomain.current === domain || scraperData.potentialParentWebsites?.includes(activeSearchDomain.current)) {
+                                            setLushaData(nameResults);
+                                            cache[currentSearch].lusha = nameResults;
+                                            setScrapedCompany(scraperData);
+                                        }
+                                    }
+                                } catch (e) { }
+                            }
+                        }
+                    } catch (scraperErr) {
+                    } finally {
+                        setScrapedLoading(false);
+                        setRedirectingParent(null);
+                        setRetryingStatus(null);
+                        setLushaLoading(false);
+                    }
+                } else {
+                    setScrapedLoading(false);
+                    setLushaLoading(false);
+                    setScrapedCompany(null);
+                }
+            })
+            .catch(err => {
+                if (activeSearchDomain.current === domain) {
+                    setLushaError(err.message);
+                    setLushaLoading(false);
+                }
+            });
+    };
+
+    // Helper to format large numbers
+    const formatNumber = (num) => {
+        if (!num || isNaN(num)) return '—';
+        return new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(num);
+    };
+
+    // Helper to format date
+    const formatDate = (dateString) => {
+        return new Date(dateString).toLocaleDateString(undefined, { year: 'numeric', month: 'long' });
     };
 
     return (
-        <div className="min-h-screen bg-[#0f172a] text-slate-100 font-sans selection:bg-indigo-500/30">
-            {/* Elegant Background Pattern */}
-            <div className="fixed inset-0 overflow-hidden pointer-events-none opacity-20 z-0">
-                <div className="absolute -top-[10%] -left-[10%] w-[40%] h-[40%] bg-indigo-600 rounded-full blur-[120px]"></div>
-                <div className="absolute top-[20%] -right-[10%] w-[35%] h-[35%] bg-purple-600 rounded-full blur-[120px]"></div>
-                <div className="absolute -bottom-[10%] left-[20%] w-[30%] h-[30%] bg-blue-600 rounded-full blur-[120px]"></div>
-                <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay"></div>
+        <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center py-10 px-4 font-sans selection:bg-indigo-500 selection:text-white">
+            <nav className="mb-10 flex gap-1 p-1 bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700/50 shadow-lg">
+                <button
+                    onClick={() => setActiveTab('single')}
+                    className={`px-8 py-2.5 rounded-lg font-bold transition-all duration-300 ${activeTab === 'single'
+                        ? 'bg-indigo-600 text-white shadow-lg'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+                        }`}
+                >
+                    Single Search
+                </button>
+                <button
+                    onClick={() => setActiveTab('bulk')}
+                    className={`px-8 py-2.5 rounded-lg font-bold transition-all duration-300 ${activeTab === 'bulk'
+                        ? 'bg-cyan-600 text-white shadow-lg'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+                        }`}
+                >
+                    Bulk Results
+                </button>
+            </nav>
+
+            {/* Separate History Button (Top Right) */}
+            <div className="fixed top-6 right-6 z-40">
+                <button
+                    onClick={() => setIsHistoryOpen(true)}
+                    className="p-3 bg-slate-800/80 hover:bg-slate-700 backdrop-blur-md rounded-full border border-slate-700/50 text-slate-400 hover:text-indigo-400 transition-all duration-300 shadow-xl group"
+                    title="View History"
+                >
+                    <svg className="w-6 h-6 transition-transform group-hover:rotate-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </button>
             </div>
 
-            {/* Navigation / Control Bar */}
-            <div className="relative z-10 w-full max-w-7xl mx-auto pt-8 px-6">
-                <div className="flex flex-col md:flex-row items-center justify-center gap-4 mb-12">
-                    <div className="bg-slate-800/50 backdrop-blur-xl p-1.5 rounded-2xl border border-slate-700/50 shadow-2xl flex gap-1">
-                        <button 
-                            onClick={() => setActiveTab('single')}
-                            className={`px-8 py-3 rounded-xl font-bold transition-all duration-300 ${activeTab === 'single' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
-                        >
-                            Single Search
-                        </button>
-                        <button 
-                            onClick={() => setActiveTab('bulk')}
-                            className={`px-8 py-3 rounded-xl font-bold transition-all duration-300 ${activeTab === 'bulk' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
-                        >
-                            Bulk Results
-                        </button>
-                    </div>
-
-                    <button className="bg-slate-800/80 backdrop-blur-md p-3 rounded-full border border-slate-700/50 text-slate-400 hover:text-indigo-400 hover:border-indigo-500/30 transition-all ml-auto absolute right-6 top-8 md:static">
-                        <Activity className="w-6 h-6" />
-                    </button>
-                </div>
-
-                {activeTab === 'single' && (
-                    <div className="max-w-4xl mx-auto">
-                        {/* Search Main Container */}
-                        <div className="relative group mb-16">
-                            <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500/20 to-purple-500/20 rounded-[2.5rem] blur opacity-75 group-hover:opacity-100 transition duration-1000 group-hover:duration-200"></div>
-                            <form onSubmit={handleAnalyze} className="relative flex items-center bg-slate-900/80 backdrop-blur-2xl rounded-[2rem] border border-slate-700/50 shadow-2xl p-3 overflow-hidden">
-                                <div className="flex-1 flex items-center px-6 gap-4">
-                                    <div className="flex gap-2">
-                                        <button type="button" onClick={() => loadFromHistory(historyIndex + 1)} className="p-2 text-slate-500 hover:text-indigo-400 transition-colors">
-                                            <ChevronUp className="w-5 h-5" />
+            <main className={`w-full ${activeTab === 'bulk' ? 'max-w-6xl' : 'max-w-2xl'} flex flex-col items-center transition-all duration-500`}>
+                {activeTab === 'single' ? (
+                    <>
+                        <form onSubmit={handleAnalyze} className="w-full mb-10 relative group flex gap-3">
+                            <div className="relative flex-grow group">
+                                <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-cyan-400 rounded-lg blur opacity-25 group-hover:opacity-100 transition duration-1000 group-hover:duration-200"></div>
+                                <div className="relative flex items-center bg-slate-800 rounded-lg ring-1 ring-slate-700/50 shadow-2xl">
+                                    <div className="flex items-center pl-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => loadFromHistory(historyIndex - 1)}
+                                            disabled={historyIndex <= 0}
+                                            className="p-2 text-slate-500 hover:text-indigo-400 transition-colors disabled:opacity-30 disabled:hover:text-slate-500"
+                                            title="Go Back"
+                                        >
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
+                                            </svg>
                                         </button>
-                                        <button type="button" onClick={() => loadFromHistory(historyIndex - 1)} className="p-2 text-slate-500 hover:text-indigo-400 transition-colors">
-                                            <ChevronDown className="w-5 h-5" />
+                                        <button
+                                            type="button"
+                                            onClick={() => loadFromHistory(historyIndex + 1)}
+                                            disabled={historyIndex >= searchHistory.length - 1}
+                                            className="p-2 text-slate-500 hover:text-indigo-400 transition-colors disabled:opacity-30 disabled:hover:text-slate-500"
+                                            title="Go Forward"
+                                        >
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                            </svg>
                                         </button>
                                     </div>
-                                    <input 
-                                        type="text" 
+                                    <input
+                                        type="text"
+                                        className="flex-grow bg-transparent text-white placeholder-slate-500 px-4 py-3 focus:outline-none text-lg"
+                                        placeholder="e.g., google.com"
                                         value={domain}
                                         onChange={(e) => setDomain(e.target.value)}
-                                        placeholder="e.g., google.com"
-                                        className="w-full bg-transparent border-none outline-none text-xl font-medium placeholder:text-slate-600"
                                     />
+                                    <button
+                                        type="submit"
+                                        disabled={loading || trafficLoading || techLoading || lushaLoading}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-md font-semibold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-indigo-500/30 m-1"
+                                    >
+                                        {loading || trafficLoading || techLoading || lushaLoading ? (
+                                            <span className="flex items-center gap-2">
+                                                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                </svg>
+                                                Analyzing...
+                                            </span>
+                                        ) : (
+                                            'Analyze'
+                                        )}
+                                    </button>
                                 </div>
-                                <button 
-                                    type="submit"
-                                    disabled={loading}
-                                    className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white px-10 py-5 rounded-[1.5rem] font-bold text-lg shadow-xl shadow-indigo-600/20 transition-all flex items-center gap-3 active:scale-95"
-                                >
-                                    {loading ? (
-                                        <div className="w-6 h-6 border-2 border-white/20 border-t-white rounded-full animate-spin"></div>
-                                    ) : (
-                                        <>Analyze</>
-                                    )}
-                                </button>
-                            </form>
-                        </div>
+                            </div>
+                        </form>
 
-                        {/* Analysis Grid */}
-                        {(data || trafficLoading) && (
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                                <StatCard 
-                                    icon={<Users className="w-6 h-6 text-blue-400" />}
-                                    title="Monthly Visits"
-                                    value={trafficLoading ? "..." : (data?.Engagments?.Visits || data?.EstimatedMonthlyVisits || "N/A")}
-                                    loading={trafficLoading}
-                                />
-                                <StatCard 
-                                    icon={<Activity className="w-6 h-6 text-green-400" />}
-                                    title="Bounce Rate"
-                                    value={trafficLoading ? "..." : (data?.Engagments?.BounceRate ? `${(data.Engagments.BounceRate * 100).toFixed(1)}%` : "N/A")}
-                                    loading={trafficLoading}
-                                />
-                                <StatCard 
-                                    icon={<Globe className="w-6 h-6 text-purple-400" />}
-                                    title="Top Country"
-                                    value={trafficLoading ? "..." : (data?.TopCountryShares?.[0]?.CountryName || "N/A")}
-                                    loading={trafficLoading}
-                                />
+                        {retryingStatus && (
+                            <div className="w-full bg-amber-500/10 border border-amber-500/50 text-amber-200 p-4 rounded-lg mb-8 text-center animate-pulse backdrop-blur-sm flex items-center justify-center gap-2">
+                                <svg className="animate-spin h-4 w-4 text-amber-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                {retryingStatus}
                             </div>
                         )}
 
-                        {/* Detailed Sections */}
+                        {error && (
+                            <div className="w-full bg-red-500/10 border border-red-500/50 text-red-200 p-4 rounded-lg mb-8 text-center animate-fade-in backdrop-blur-sm">
+                                {error}
+                            </div>
+                        )}
+
+                        {redirectingParent && (
+                            <div className="w-full bg-indigo-500/10 border border-indigo-500/50 text-indigo-200 p-4 rounded-lg mb-8 text-center animate-fade-in backdrop-blur-sm flex items-center justify-center gap-2">
+                                <svg className="animate-spin h-4 w-4 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                Found Parent Company: <span className="font-bold text-white">{redirectingParent}</span>. Fetching accurate data...
+                            </div>
+                        )}
+
                         {data && (data.Engagments?.Visits || data.EstimatedMonthlyVisits) && (
-                            <div className="w-full space-y-8 animate-slide-up">
-                                <div className="bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
-                                    <div className="px-8 py-6 border-b border-slate-700/50 flex items-center justify-between">
-                                        <h2 className="text-xl font-bold flex items-center gap-3 text-white">
-                                            <BarChart3 className="w-6 h-6 text-indigo-400" />
-                                            Traffic Insights
-                                        </h2>
-                                        {data.Engagments?.Year && (
-                                            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 bg-slate-900/50 px-3 py-1.5 rounded-full border border-slate-700/50">
-                                                Active Since {data.Engagments.Year}
-                                            </span>
-                                        )}
-                                    </div>
-                                    <div className="p-8">
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
-                                            <MetricItem label="Avg. Visit Duration" value={data.Engagments.TimeOnSite ? `${Math.floor(data.Engagments.TimeOnSite / 60)}m ${data.Engagments.TimeOnSite % 60}s` : "N/A"} />
-                                            <MetricItem label="Pages per Visit" value={data.Engagments.PageViews?.toFixed(2) || "N/A"} />
-                                            <MetricItem label="Global Rank" value={data.GlobalRank || "N/A"} />
-                                            <MetricItem label="Category Rank" value={data.CategoryRank || "N/A"} />
+                            <div className="w-full animate-slide-up">
+                                <div className="bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
+                                    <div className="p-6 border-b border-slate-700/50 flex justify-between items-center bg-gradient-to-r from-slate-800 to-slate-900">
+                                        <div className="flex flex-col">
+                                            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                                <span className="w-2 h-6 bg-cyan-400 rounded-full"></span>
+                                                Traffic Overview
+                                            </h2>
+                                            <p className="text-[10px] text-slate-500 font-bold ml-4 uppercase tracking-wider italic">
+                                                Analysis for {new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+                                            </p>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            <button
+                                                onClick={copyToSheets}
+                                                className={`text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 px-3 py-1.5 rounded-lg border ${copied ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400' : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white hover:border-slate-500'}`}
+                                            >
+                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                                </svg>
+                                                {copied ? 'Copied!' : 'Copy to Sheets'}
+                                            </button>
+                                            <span className="text-xs font-mono text-cyan-400 bg-cyan-400/10 px-2 py-1 rounded border border-cyan-400/20">LIVE DATA</span>
                                         </div>
                                     </div>
-                                </div>
-                            </div>
-                        )}
 
-                        {/* Tech Stack Component */}
-                        {(techStack || techLoading) && (
-                            <div className="w-full mt-8 animate-slide-up animation-delay-100">
-                                <div className="bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
-                                    <div className="px-8 py-6 border-b border-slate-700/50 flex items-center justify-between bg-gradient-to-r from-slate-800/20 to-transparent">
-                                        <h2 className="text-xl font-bold flex items-center gap-3 text-white">
-                                            <Zap className="w-6 h-6 text-yellow-500" />
-                                            Technology Stack
-                                        </h2>
-                                        <span className="text-xs font-bold text-slate-500 uppercase tracking-widest bg-slate-900/50 px-3 py-1 rounded-lg border border-slate-700/30">
-                                            {techStack?.length || 0} Tools Detected
-                                        </span>
-                                    </div>
-                                    <div className="p-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                                        {techLoading ? (
-                                            Array(6).fill(0).map((_, i) => <div key={i} className="h-20 bg-slate-700/30 rounded-xl animate-pulse"></div>)
-                                        ) : (
-                                            techStack?.reduce((acc, tech) => {
-                                                const cat = tech.Tag || 'Other';
-                                                if (!acc[cat]) acc[cat] = [];
-                                                acc[cat].push(tech);
-                                                return acc;
-                                            }, {}) && Object.entries(techStack.reduce((acc, tech) => {
-                                                const cat = tech.Tag || 'Other';
-                                                if (!acc[cat]) acc[cat] = [];
-                                                acc[cat].push(tech);
-                                                return acc;
-                                            }, {})).map(([category, techs]) => (
-                                                <div key={category} className="group flex flex-col p-5 bg-slate-900/40 rounded-2xl border border-slate-700/30 hover:border-indigo-500/30 transition-all hover:bg-slate-900/60 shadow-lg">
-                                                    <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-3 opacity-80 group-hover:opacity-100">{category}</span>
-                                                    <div className="flex flex-wrap gap-2">
-                                                        {techs.slice(0, 5).map((t, idx) => (
-                                                            <div key={idx} className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/80 rounded-lg text-sm font-medium text-slate-300 border border-slate-700/50 group-hover:text-white group-hover:border-slate-600 transition-colors">
-                                                                {t.Name}
-                                                            </div>
-                                                        ))}
-                                                    </div>
+                                    <div className="p-6">
+                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                                            <div className="flex gap-8">
+                                                <div>
+                                                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-1">Monthly Visits</p>
+                                                    <p className="text-5xl font-black text-white tracking-tight">
+                                                        {(() => {
+                                                            if (data.Engagments?.Visits) return formatNumber(parseInt(data.Engagments.Visits, 10));
+                                                            if (data.EstimatedMonthlyVisits) {
+                                                                const dates = Object.keys(data.EstimatedMonthlyVisits).sort((a, b) => new Date(b) - new Date(a));
+                                                                if (dates.length > 0) return formatNumber(data.EstimatedMonthlyVisits[dates[0]]);
+                                                            }
+                                                            return '—';
+                                                        })()}
+                                                    </p>
+                                                    <p className="text-xs text-slate-500 mt-1 font-medium">sessions</p>
                                                 </div>
-                                            ))
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
+                                                <div>
+                                                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-1">Page Views</p>
+                                                    <p className="text-5xl font-black text-cyan-400 tracking-tight">
+                                                        {(() => {
+                                                            const visits = data.Engagments?.Visits ? parseInt(data.Engagments.Visits, 10) : (data.EstimatedMonthlyVisits ? Object.values(data.EstimatedMonthlyVisits).pop() : null);
+                                                            const ppv = data.Engagments?.PagePerVisit ? parseFloat(data.Engagments.PagePerVisit) : 1.5;
+                                                            if (visits) return formatNumber(Math.round(visits * ppv));
+                                                            return '—';
+                                                        })()}
+                                                    </p>
+                                                    <p className="text-xs text-slate-500 mt-1 font-medium">total page views</p>
+                                                </div>
+                                            </div>
 
-                        {loading === false && data && !techStack && !techLoading && (
-                            <div className="w-full mt-8 animate-slide-up animation-delay-200">
-                                <div className="bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden p-8 text-center text-slate-400">
-                                    <p className="text-lg font-medium">No Technology Stack Detected</p>
-                                    <p className="text-sm mt-1">BuiltWith could not find any technology profile for this domain.</p>
+                                            <div className="flex flex-wrap gap-3">
+                                                {data.GlobalRank?.Rank && (
+                                                    <div className="flex flex-col items-center bg-slate-900/60 border border-slate-700/40 rounded-xl px-5 py-3">
+                                                        <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Global Rank</span>
+                                                        <span className="text-2xl font-black text-cyan-400">#{formatNumber(data.GlobalRank.Rank)}</span>
+                                                    </div>
+                                                )}
+                                                {data.CountryRank?.Rank && (
+                                                    <div className="flex flex-col items-center bg-slate-900/60 border border-slate-700/40 rounded-xl px-5 py-3">
+                                                        <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">{data.CountryRank.CountryCode || 'Country'} Rank</span>
+                                                        <span className="text-2xl font-black text-indigo-400">#{formatNumber(data.CountryRank.Rank)}</span>
+                                                    </div>
+                                                )}
+                                                {data.Engagments?.PagePerVisit && (
+                                                    <div className="flex flex-col items-center bg-slate-900/60 border border-slate-700/40 rounded-xl px-5 py-3">
+                                                        <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Pages / Visit</span>
+                                                        <span className="text-2xl font-black text-emerald-400">{parseFloat(data.Engagments.PagePerVisit).toFixed(1)}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {data.EstimatedMonthlyVisits && (
+                                        <div className="mt-2 border-t border-slate-700/30 pt-4 px-6 pb-4">
+                                            <button
+                                                onClick={() => setShowMonthlyVisits(v => !v)}
+                                                className="flex items-center gap-2 text-xs font-bold text-slate-400 hover:text-cyan-400 transition-colors mb-4"
+                                            >
+                                                <svg className={`w-4 h-4 transition-transform duration-300 ${showMonthlyVisits ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                                </svg>
+                                                {showMonthlyVisits ? 'Hide' : 'Show'} Historical Traffic
+                                            </button>
+
+                                            {showMonthlyVisits && (
+                                                <div className="overflow-x-auto animate-slide-up">
+                                                    <table className="w-full text-left">
+                                                        <thead>
+                                                            <tr className="border-b border-slate-700/50 text-slate-400 text-[10px] uppercase tracking-wider">
+                                                                <th className="px-4 py-2 font-black">Period</th>
+                                                                <th className="px-4 py-2 font-black text-right">Traffic Volume</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-slate-700/20">
+                                                            {Object.entries(data.EstimatedMonthlyVisits)
+                                                                .sort((a, b) => new Date(b[0]) - new Date(a[0]))
+                                                                .slice(0, 3)
+                                                                .map(([date, visits]) => (
+                                                                    <tr key={date} className="hover:bg-slate-700/20 transition-colors">
+                                                                        <td className="px-4 py-3 text-slate-300 text-sm font-semibold">{formatDate(date)}</td>
+                                                                        <td className="px-4 py-3 text-right text-slate-300 font-mono text-sm">{formatNumber(visits)}</td>
+                                                                    </tr>
+                                                                ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -525,104 +820,137 @@ function App() {
                             />
                         )}
 
-                        {/* Manual Lusha Unlock Button */}
-                        {!lushaRequested && !lushaData && !lushaLoading && (data || techStack) && (
+                        {(techStack || techLoading) && (
                             <div className="w-full mt-8 animate-slide-up">
-                                <div className="bg-gradient-to-br from-slate-800 to-indigo-900/30 backdrop-blur-md rounded-2xl border border-indigo-500/30 p-8 text-center shadow-2xl relative overflow-hidden group">
-                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                                        <svg className="w-24 h-24 text-indigo-400 rotate-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A10.003 10.003 0 0012 21a10.003 10.003 0 008.381-4.562l.054.091c-1.744-2.772-2.753-6.054-2.753-9.571V7a1 1 0 00-1-1H7a1 1 0 00-1 1v3.857c0 3.421-1.348 6.524-3.545 8.785l-.014.014" />
-                                        </svg>
+                                <div className="bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
+                                    <div className="p-6 border-b border-slate-700/50 flex justify-between items-center bg-gradient-to-r from-slate-800 to-slate-900">
+                                        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                            <span className="w-2 h-6 bg-indigo-500 rounded-full"></span>
+                                            Technology Stack
+                                        </h2>
+                                        {techStack && (
+                                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest bg-slate-900/50 px-3 py-1.5 rounded-full border border-slate-700/50">
+                                                {Object.values(techStack).flat().length} Tools Detected
+                                            </span>
+                                        )}
                                     </div>
-                                    <Building2 className="w-12 h-12 text-indigo-400 mx-auto mb-4" />
-                                    <h3 className="text-lg font-bold text-white mb-2">Identify Key Decision Makers</h3>
-                                    <p className="text-slate-400 text-sm mb-6 max-w-sm mx-auto">Connect with tech and management leaders through verified Lusha contact data.</p>
-                                    <button 
-                                        onClick={handleRevealContacts}
-                                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-indigo-600/20 transition-all active:scale-95 flex items-center justify-center gap-2 mx-auto"
-                                    >
-                                        <Eye className="w-4 h-4" />
-                                        Reveal Contacts
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Lusha Results */}
-                        {(lushaData || lushaLoading) && (
-                            <div className="w-full mt-8 animate-slide-up">
-                                <div className="bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
-                                    <div className="px-8 py-6 border-b border-slate-700/50 bg-gradient-to-r from-slate-800 to-transparent flex items-center justify-between">
-                                        <div>
-                                            <h2 className="text-xl font-bold flex items-center gap-3 text-white">
-                                                <Shield className="w-6 h-6 text-indigo-400" />
-                                                Verified Decision Makers
-                                            </h2>
-                                            {scrapedCompany?.name && (
-                                                <p className="text-indigo-400 text-sm font-semibold mt-1 flex items-center gap-2">
-                                                    <CheckCircle2 className="w-3 h-3" />
-                                                    Current Employees @ {scrapedCompany.name}
-                                                </p>
-                                            )}
-                                        </div>
-                                        <div className="flex items-center gap-4">
-                                            {lushaData?.data?.length > 0 && (
-                                                <span className="bg-green-500/10 text-green-400 px-3 py-1 rounded-lg text-xs font-bold border border-green-500/20">
-                                                    {lushaData.data.length} Results Found
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                    
-                                    <div className="p-8">
-                                        {lushaLoading ? (
-                                            <div className="space-y-4">
-                                                {[1,2,3].map(i => <div key={i} className="h-24 bg-slate-700/30 rounded-xl animate-pulse"></div>)}
+                                    <div className="p-6">
+                                        {techLoading ? (
+                                            <div className="flex flex-col items-center py-10 gap-4">
+                                                <div className="w-10 h-10 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+                                                <p className="text-slate-400 text-sm animate-pulse">Scanning infrastructure...</p>
                                             </div>
-                                        ) : lushaData?.data?.length > 0 ? (
+                                        ) : techStack ? (
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                {lushaData.data.map((contact, i) => (
-                                                    <ContactCard key={i} contact={contact} />
-                                                ))}
+                                                {Object.entries(techStack)
+                                                    .sort((a, b) => b[1].length - a[1].length)
+                                                    .slice(0, showAllTech ? undefined : 6)
+                                                    .map(([category, techs]) => (
+                                                        <div key={category} className="p-4 bg-slate-900/40 rounded-xl border border-slate-700/30 hover:border-indigo-500/30 transition-all group">
+                                                            <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-3 opacity-60 group-hover:opacity-100">{category}</p>
+                                                            <div className="flex flex-wrap gap-2">
+                                                                {techs.slice(0, 5).map((t, idx) => (
+                                                                    <span key={idx} className={`px-2.5 py-1 rounded-md text-xs font-bold transition-colors ${t.isRecent ? 'bg-indigo-500/10 text-indigo-300 border border-indigo-500/20' : 'bg-slate-800 text-slate-400 border border-slate-700/50'}`}>
+                                                                        {t.Name}
+                                                                    </span>
+                                                                ))}
+                                                                {techs.length > 5 && <span className="text-[10px] text-slate-500 font-bold self-center">+{techs.length - 5} more</span>}
+                                                            </div>
+                                                        </div>
+                                                    ))}
                                             </div>
                                         ) : (
-                                            <div className="text-center py-12">
-                                                <AlertCircle className="w-12 h-12 text-slate-600 mx-auto mb-4" />
-                                                <p className="text-slate-400 font-medium">No verified technical contacts found.</p>
-                                                <p className="text-xs text-slate-500 mt-2">Try searching the parent company or a different department.</p>
+                                            <div className="text-center py-10">
+                                                <p className="text-slate-500 italic">No technology stack detected for this domain.</p>
                                             </div>
+                                        )}
+
+                                        {techStack && Object.keys(techStack).length > 6 && (
+                                            <button
+                                                onClick={() => setShowAllTech(v => !v)}
+                                                className="w-full mt-6 py-3 bg-slate-900/50 hover:bg-slate-700/50 border border-slate-700/50 rounded-xl text-xs font-black uppercase tracking-[0.2em] text-slate-400 hover:text-white transition-all"
+                                            >
+                                                {showAllTech ? 'Show Less' : 'View Full Stack'}
+                                            </button>
                                         )}
                                     </div>
                                 </div>
                             </div>
                         )}
-                    </div>
-                )}
 
-                {activeTab === 'bulk' && (
-                    <div className="max-w-6xl mx-auto py-12 text-center">
-                        <Lock className="w-16 h-16 text-slate-700 mx-auto mb-6" />
-                        <h2 className="text-3xl font-black text-white mb-2">Bulk Analysis</h2>
-                        <p className="text-slate-400 max-w-lg mx-auto mb-8">Process multiple domains simultaneously. Upload CSV or paste list of domains.</p>
-                        <div className="bg-slate-800/30 p-12 rounded-[2rem] border-2 border-dashed border-slate-700/50">
-                            <p className="text-slate-500 text-sm font-mono mt-8 italic">Bulk features coming soon...</p>
+                        <div className="w-full mt-8 animate-slide-up">
+                            {!lushaRequested ? (
+                                <div className="bg-gradient-to-br from-indigo-600/20 to-purple-600/20 backdrop-blur-md rounded-2xl border border-indigo-500/30 p-8 text-center shadow-2xl relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                                        <svg className="w-24 h-24 text-indigo-400 rotate-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11c0 3.517-1.009 6.799-2.753 9.571m-3.44-2.04l.054-.09A10.003 10.003 0 0012 21a10.003 10.003 0 008.381-4.562l.054.091c-1.744-2.772-2.753-6.054-2.753-9.571V7a1 1 0 00-1-1H7a1 1 0 00-1 1v3.857c0 3.421-1.348 6.524-3.545 8.785l-.014.014" />
+                                        </svg>
+                                    </div>
+                                    <h3 className="text-lg font-bold text-white mb-2">Identify Key Decision Makers</h3>
+                                    <p className="text-slate-400 text-sm mb-6 max-w-sm mx-auto">Connect with technical and management leads through automated verified data sourcing.</p>
+                                    <button
+                                        onClick={handleLushaUnlock}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-lg font-bold shadow-lg shadow-indigo-600/20 transition-all active:scale-95"
+                                    >
+                                        Reveal Technical Contacts
+                                    </button>
+                                </div>
+                            ) : (
+                                <DecisionMakers
+                                    loading={lushaLoading || scrapedLoading}
+                                    data={lushaData}
+                                    error={lushaError}
+                                    scrapedCompany={scrapedCompany}
+                                />
+                            )}
+                        </div>
+                    </>
+                ) : (
+                    <BulkAnalyzer />
+                )}
+            </main>
+
+            {/* Hidden History Overlay */}
+            {isHistoryOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm" onClick={() => setIsHistoryOpen(false)}></div>
+                    <div className="relative w-full max-w-md bg-slate-800 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden animate-scale-in">
+                        <div className="p-6 border-b border-slate-700 flex justify-between items-center">
+                            <h3 className="text-lg font-bold">Search History</h3>
+                            <button onClick={() => setIsHistoryOpen(false)} className="text-slate-400 hover:text-white">
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="max-h-[60vh] overflow-y-auto p-4 flex flex-col gap-2">
+                            {searchHistory.length > 0 ? (
+                                searchHistory.map((h, i) => (
+                                    <button
+                                        key={i}
+                                        onClick={() => {
+                                            loadFromHistory(i);
+                                            setIsHistoryOpen(false);
+                                        }}
+                                        className="w-full text-left px-4 py-3 bg-slate-900/50 hover:bg-indigo-600/20 rounded-xl border border-slate-700/50 hover:border-indigo-500/30 transition-all group flex items-center justify-between"
+                                    >
+                                        <span className="font-medium group-hover:text-indigo-400">{h}</span>
+                                        <svg className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                        </svg>
+                                    </button>
+                                ))
+                            ) : (
+                                <div className="text-center py-10 text-slate-500 italic">No search history yet.</div>
+                            )}
                         </div>
                     </div>
-                )}
-            </div>
-
-            {/* Footer */}
-            <div className="relative z-10 py-12 text-center text-slate-500 text-[10px] uppercase font-black tracking-widest bg-gradient-to-t from-slate-900/50 to-transparent mt-20">
-                &copy; 2024 Domain Traffic Analyzer • High-Accuracy Competitive Intelligence
-            </div>
-            
-            {/* Visual Effects */}
-            <div className="fixed top-0 inset-x-0 h-40 bg-gradient-to-b from-[#0f172a] to-transparent pointer-events-none z-10"></div>
+                </div>
+            )}
         </div>
     );
 }
 
-// Sub-components
 function PageSpeedResults({ mobileData, desktopData, onRetry, loading }) {
     const [strategy, setStrategy] = useState('mobile');
     const data = strategy === 'mobile' ? mobileData : desktopData;
@@ -673,216 +1001,85 @@ function PageSpeedResults({ mobileData, desktopData, onRetry, loading }) {
     const metrics = data?.lighthouseResult?.audits || {};
 
     const getScoreColor = (score) => {
-        if (score >= 90) return 'text-green-500';
-        if (score >= 50) return 'text-orange-500';
-        return 'text-red-500';
+        if (score >= 90) return 'text-emerald-500';
+        if (score >= 50) return 'text-amber-500';
+        return 'text-rose-500';
     };
 
     const getScoreBg = (score) => {
-        if (score >= 90) return 'bg-green-500/10';
-        if (score >= 50) return 'bg-orange-500/10';
-        return 'bg-red-500/10';
-    };
-
-    const getStatusLabel = (category) => {
-        if (category === 'FAST') return <span className="text-green-500 font-bold">Fast</span>;
-        if (category === 'AVERAGE') return <span className="text-orange-500 font-bold">Average</span>;
-        return <span className="text-red-500 font-bold">Slow</span>;
+        if (score >= 90) return 'bg-emerald-500/10';
+        if (score >= 50) return 'bg-amber-500/10';
+        return 'bg-rose-500/10';
     };
 
     return (
-        <div className="w-full mt-8 bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden animate-slide-up">
-            <div className="px-8 py-6 border-b border-slate-700/50 bg-gradient-to-r from-slate-800 to-transparent flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="w-full mt-8 bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden animate-slide-up">
+            <div className="p-6 border-b border-slate-700/50 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gradient-to-r from-slate-800 to-slate-900">
                 <div className="flex items-center gap-3">
-                    <Activity className="w-6 h-6 text-indigo-400" />
+                    <span className="w-2 h-6 bg-indigo-500 rounded-full"></span>
                     <h2 className="text-xl font-bold text-white">Google PageSpeed Insights</h2>
                 </div>
                 <div className="flex bg-slate-900/50 p-1 rounded-xl border border-slate-700/50">
                     <button 
                         onClick={() => setStrategy('mobile')}
-                        className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold text-sm transition-all ${strategy === 'mobile' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                        className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold text-xs transition-all ${strategy === 'mobile' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
                     >
-                        <Smartphone className="w-4 h-4" />
                         Mobile
                     </button>
                     <button 
                         onClick={() => setStrategy('desktop')}
-                        className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold text-sm transition-all ${strategy === 'desktop' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                        className={`flex items-center gap-2 px-6 py-2 rounded-lg font-bold text-xs transition-all ${strategy === 'desktop' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
                     >
-                        <Monitor className="w-4 h-4" />
                         Desktop
                     </button>
                 </div>
             </div>
 
             <div className="p-8">
-                {loading && (
-                    <div className="flex items-center gap-3 mb-6 bg-indigo-600/10 border border-indigo-500/20 p-4 rounded-xl">
-                        <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                        <p className="text-sm font-semibold text-indigo-300">Refreshing Strategy...</p>
-                    </div>
-                )}
-                
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-                    {/* Main Performance Circle */}
-                    <div className="lg:col-span-4 flex flex-col items-center justify-center p-8 bg-slate-900/40 rounded-3xl border border-slate-700/50 shadow-inner">
+                    {/* Score Circle */}
+                    <div className="lg:col-span-4 flex flex-col items-center justify-center p-8 bg-slate-900/40 rounded-3xl border border-slate-700/50">
                         <div className={`relative w-48 h-48 rounded-full flex items-center justify-center border-8 ${getScoreColor(performanceScore).replace('text', 'border')} ${getScoreBg(performanceScore)}`}>
                             <div className="text-center">
-                                <span className={`text-6xl font-black ${getScoreColor(performanceScore)}`}>
+                                <span className={`text-6xl font-black ${getScoreColor(performanceScore)} font-mono`}>
                                     {Math.round(performanceScore || 0)}
                                 </span>
                                 <div className="text-[10px] uppercase font-black tracking-widest text-slate-500 mt-1">Performance</div>
                             </div>
                         </div>
-                        <div className="mt-8 grid grid-cols-3 gap-3 w-full">
-                            <ScoreDot color="bg-red-500" range="0-49" />
-                            <ScoreDot color="bg-orange-500" range="50-89" />
-                            <ScoreDot color="bg-green-500" range="90-100" />
-                        </div>
                     </div>
 
-                    {/* Core Web Vitals & Real-user data */}
-                    <div className="lg:col-span-8 space-y-8">
+                    {/* Vitals */}
+                    <div className="lg:col-span-8 space-y-6">
                         <div>
-                            <div className="flex items-center gap-2 mb-4">
-                                <h3 className="text-lg font-black text-white uppercase tracking-wider">Core Web Vitals Assessment</h3>
-                                {data?.loadingExperience?.overall_category && (
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest ${data.loadingExperience.overall_category === 'FAST' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                                        {data.loadingExperience.overall_category === 'FAST' ? 'Passed' : 'Failed'}
-                                    </span>
-                                )}
-                            </div>
+                            <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4">Core Web Vitals Assessment</h3>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <PerformanceMetricCard 
-                                    name="Largest Contentful Paint (LCP)" 
+                                <MetricCard 
+                                    label="LCP" 
+                                    name="Largest Contentful Paint"
                                     value={coreWebVitals.metrics?.LARGEST_CONTENTFUL_PAINT_MS?.percentile ? `${(coreWebVitals.metrics.LARGEST_CONTENTFUL_PAINT_MS.percentile / 1000).toFixed(1)}s` : metrics['largest-contentful-paint']?.displayValue || 'N/A'}
                                     category={coreWebVitals.metrics?.LARGEST_CONTENTFUL_PAINT_MS?.category}
                                 />
-                                <PerformanceMetricCard 
-                                    name="Interaction to Next Paint (INP)" 
+                                <MetricCard 
+                                    label="INP" 
+                                    name="Interaction to Next Paint"
                                     value={coreWebVitals.metrics?.INTERACTION_TO_NEXT_PAINT?.percentile ? `${coreWebVitals.metrics.INTERACTION_TO_NEXT_PAINT.percentile}ms` : 'N/A'}
                                     category={coreWebVitals.metrics?.INTERACTION_TO_NEXT_PAINT?.category}
                                 />
-                                <PerformanceMetricCard 
-                                    name="Cumulative Layout Shift (CLS)" 
+                                <MetricCard 
+                                    label="CLS" 
+                                    name="Cumulative Layout Shift"
                                     value={coreWebVitals.metrics?.CUMULATIVE_LAYOUT_SHIFT_SCORE?.percentile ? (coreWebVitals.metrics.CUMULATIVE_LAYOUT_SHIFT_SCORE.percentile / 100).toFixed(2) : metrics['cumulative-layout-shift']?.displayValue || 'N/A'}
                                     category={coreWebVitals.metrics?.CUMULATIVE_LAYOUT_SHIFT_SCORE?.category}
                                 />
-                                <PerformanceMetricCard 
-                                    name="First Contentful Paint (FCP)" 
+                                <MetricCard 
+                                    label="FCP" 
+                                    name="First Contentful Paint"
                                     value={coreWebVitals.metrics?.FIRST_CONTENTFUL_PAINT_MS?.percentile ? `${(coreWebVitals.metrics.FIRST_CONTENTFUL_PAINT_MS.percentile / 1000).toFixed(1)}s` : metrics['first-contentful-paint']?.displayValue || 'N/A'}
                                     category={coreWebVitals.metrics?.FIRST_CONTENTFUL_PAINT_MS?.category}
                                 />
                             </div>
                         </div>
-
-                        <div className="pt-6 border-t border-slate-700/50">
-                            <div className="flex items-center justify-between mb-2">
-                                <p className="text-xs text-slate-500 uppercase font-black tracking-widest">About this audit</p>
-                                <button onClick={onRetry} className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
-                                    <Activity className="w-3 h-3" /> Force Refresh Result
-                                </button>
-                            </div>
-                            <p className="text-xs text-slate-500 leading-relaxed">
-                                Values are captured from the Google PageSpeed V5 API using actual Chrome user data (CrUX) where available and simulated Lighthouse lab results.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-function ScoreDot({ color, range }) {
-    return (
-        <div className="flex flex-col items-center gap-1">
-            <div className={`w-3 h-3 rounded-full ${color}`}></div>
-            <span className="text-[10px] font-bold text-slate-500">{range}</span>
-        </div>
-    );
-}
-
-function PerformanceMetricCard({ name, value, category }) {
-    const getBadgeStyle = (cat) => {
-        if (cat === 'FAST') return 'bg-green-500/20 text-green-400';
-        if (cat === 'AVERAGE') return 'bg-orange-500/20 text-orange-400';
-        return 'bg-red-500/20 text-red-400';
-    };
-
-    return (
-        <div className="bg-slate-900/60 p-5 rounded-2xl border border-slate-700/40 hover:border-slate-600 transition-all group">
-            <div className="flex justify-between items-start mb-2">
-                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest group-hover:text-slate-400">{name}</span>
-                {category && <span className={`text-[8px] px-2 py-0.5 rounded font-black uppercase tracking-widest ${getBadgeStyle(category)}`}>{category}</span>}
-            </div>
-            <div className="text-2xl font-black text-white">{value}</div>
-        </div>
-    );
-}
-
-function StatCard({ icon, title, value, loading }) {
-    return (
-        <div className="bg-slate-800/50 backdrop-blur-md p-8 rounded-3xl border border-slate-700/50 hover:bg-slate-800/80 transition-all duration-300 shadow-2xl group">
-            <div className="flex items-center gap-4 mb-4">
-                <div className="p-3 bg-slate-900/50 rounded-2xl border border-slate-700 group-hover:border-indigo-500/30 transition-colors">
-                    {icon}
-                </div>
-                <h3 className="text-slate-400 font-bold uppercase tracking-widest text-[10px]">{title}</h3>
-            </div>
-            <div className={`text-3xl font-black truncate tracking-tight ${loading ? 'opacity-20' : 'text-white'}`}>
-                {value}
-            </div>
-        </div>
-    );
-}
-
-function MetricItem({ label, value }) {
-    return (
-        <div className="flex flex-col group">
-            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 group-hover:text-indigo-400 transition-colors">{label}</span>
-            <span className="text-xl font-bold text-white tracking-tight">{value}</span>
-        </div>
-    );
-}
-
-function ContactCard({ contact }) {
-    return (
-        <div className="p-6 bg-slate-900/40 rounded-2xl border border-slate-700/30 hover:border-indigo-500/30 transition-all group relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                <Linkedin className="w-5 h-5 text-indigo-400 hover:text-indigo-300 cursor-pointer" />
-            </div>
-            
-            <div className="flex items-start gap-5">
-                <div className="w-14 h-14 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-white font-black text-xl shadow-lg group-hover:scale-110 transition-transform">
-                    {contact.first_name?.[0]}{contact.last_name?.[0]}
-                </div>
-                <div>
-                    <h4 className="font-bold text-lg text-white group-hover:text-indigo-300 transition-colors">{contact.first_name} {contact.last_name}</h4>
-                    <p className="text-slate-400 text-sm font-medium mb-4">{contact.job_title}</p>
-                    
-                    <div className="space-y-2.5">
-                        {contact.emails?.[0] && (
-                            <div className="flex items-center gap-3 text-sm text-slate-400 hover:text-white transition-colors cursor-pointer group/item">
-                                <div className="p-1.5 bg-slate-800 rounded-lg border border-slate-700 group-hover/item:border-indigo-500/30">
-                                    <Mail className="w-3.5 h-3.5" />
-                                </div>
-                                <span>{contact.emails[0]}</span>
-                            </div>
-                        )}
-                        {contact.phones?.[0] && (
-                            <div className="flex items-center gap-3 text-sm text-slate-400">
-                                <div className="p-1.5 bg-slate-800 rounded-lg border border-slate-700">
-                                    <Phone className="w-3.5 h-3.5" />
-                                </div>
-                                <span>{contact.phones[0]}</span>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-export default App;
+                        <div className="pt-6 border-t border-slate-700/50 flex justify-between items-center">
+                            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Source: Google PageSpeed API V5</p>
+                            <button onClick={onRetry} className="text-[10px] font-black uppercase tracking-widest text-indigo-400
