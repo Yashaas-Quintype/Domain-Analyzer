@@ -31,7 +31,7 @@ export default async function handler(req, res) {
             if (!domain || !strategy) return res.status(400).json({ error: 'domain and strategy are required' });
 
             const key = process.env.VITE_PAGESPEED_KEY;
-            const fields = 'loadingExperience,originLoadingExperience,lighthouseResult.categories.performance.score,lighthouseResult.lighthouseVersion';
+            const fields = 'loadingExperience,originLoadingExperience,lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
             const target = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${domain}/&key=${key}&category=performance&strategy=${strategy}&fields=${encodeURIComponent(fields)}`;
 
             const response = await axios.get(target);

@@ -73,8 +73,55 @@ function App() {
     const [pageSpeedMobile, setPageSpeedMobile] = useState(null);
     const [pageSpeedDesktop, setPageSpeedDesktop] = useState(null);
     const [pageSpeedLoading, setPageSpeedLoading] = useState(false);
+    const [pageSpeedStarted, setPageSpeedStarted] = useState(false);
     const [trafficLoading, setTrafficLoading] = useState(false);
     const [techLoading, setTechLoading] = useState(false);
+    const [copied, setCopied] = useState(false);
+
+    // History State
+    const [searchHistory, setSearchHistory] = useState([]);
+    const [historyIndex, setHistoryIndex] = useState(-1);
+    const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+
+    // Helper to load a domain from history/cache
+    const loadFromHistory = (index) => {
+        if (index < 0 || index >= searchHistory.length) return;
+        const targetDomain = searchHistory[index];
+        const cached = cache[targetDomain.toLowerCase().trim()];
+
+        if (cached) {
+            setDomain(targetDomain);
+            activeSearchDomain.current = targetDomain;
+            setHistoryIndex(index);
+
+            // Restore all state from cache
+            setData(cached.traffic);
+            setTechStack(cached.tech);
+            setLushaData(cached.lusha);
+            setScrapedCompany(cached.scraped);
+            setPageSpeedMobile(cached.pageSpeed_mobile);
+            setPageSpeedDesktop(cached.pageSpeed_desktop);
+
+            // Reset loading states
+            setLoading(false);
+            setTrafficLoading(false);
+            setTechLoading(false);
+            setPageSpeedLoading(false);
+            setPageSpeedStarted(true);
+            setLushaLoading(false);
+            setLushaRequested(!!cached.lusha);
+        }
+    };
+
+    const addToHistory = (newDomain) => {
+        const cleanDomain = newDomain.toLowerCase().trim();
+        // Don't add if it's the same as the current history item
+        if (historyIndex >= 0 && searchHistory[historyIndex].toLowerCase().trim() === cleanDomain) return;
+
+        const newHistory = [...searchHistory.slice(0, historyIndex + 1), newDomain];
+        setSearchHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+    };
 
     const handleAnalyze = async (e) => {
         e.preventDefault();
@@ -88,6 +135,11 @@ function App() {
             setTechStack(cached.tech);
             setLushaData(cached.lusha);
             setScrapedCompany(cached.scraped);
+            setPageSpeedMobile(cached.pageSpeed_mobile);
+            setPageSpeedDesktop(cached.pageSpeed_desktop);
+            setLushaRequested(!!cached.lusha);
+
+            addToHistory(domain);
             return;
         }
 
@@ -107,6 +159,7 @@ function App() {
         setPageSpeedMobile(null);
         setPageSpeedDesktop(null);
         setPageSpeedLoading(true);
+        setPageSpeedStarted(true);
         setTrafficLoading(true);
         setTechLoading(true);
 
@@ -117,90 +170,46 @@ function App() {
         const currentSearch = cleanSearch;
 
         // 0. PageSpeed Insights
-        setPageSpeedLoading(true);
-        setTrafficLoading(true);
-        setTechLoading(true);
-        setLushaLoading(false); // Lusha is now manual
+        const runPageSpeedAudit = (targetDomain) => {
+            setPageSpeedLoading(true);
+            let psResolvedCount = 0;
+            const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+            const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
 
-        const strategies = ['mobile', 'desktop'];
-        let psResolvedCount = 0;
-        const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
-        const PSI_FIELDS = 'loadingExperience,originLoadingExperience,lighthouseResult.categories.performance.score,lighthouseResult.lighthouseVersion';
-
-        if (!PSI_KEY) {
-            console.warn('PageSpeed API key missing - skipping PageSpeed analysis');
-            setPageSpeedLoading(false);
-        } else {
-            const normalizedDomain = currentSearch.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
-
-            const safetyTimer = setTimeout(() => {
-                if (psResolvedCount < 2) {
-                    console.warn("PageSpeed Insight scan timed out after 60s");
-                    setPageSpeedLoading(false);
-                }
-            }, 60000);
-
-            strategies.forEach(type => {
-                if (cache[currentSearch]?.[`pageSpeed_${type}`]) {
-                    const cachedData = cache[currentSearch][`pageSpeed_${type}`];
-                    if (type === 'mobile') setPageSpeedMobile(cachedData);
-                    else setPageSpeedDesktop(cachedData);
-                    psResolvedCount++;
-                    if (psResolvedCount === 2) {
-                        clearTimeout(safetyTimer);
-                        setPageSpeedLoading(false);
-                    }
-                    return;
-                }
-
-                const runAudit = async (targetDomain) => {
+            ['mobile', 'desktop'].forEach(type => {
+                const runAudit = async (d) => {
                     const tryUrls = [
-                        // Try 1: Direct Google API (works on localhost and Vercel)
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        // Try 2: www. prefix variant
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        // Try 3: Via proxy (fallback for Vercel)
-                        `/api/pagespeed?domain=${targetDomain}&strategy=${type}`
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                        `/api/pagespeed?domain=${d}&strategy=${type}`
                     ];
-
-                    let lastErr = null;
                     for (const url of tryUrls) {
                         try {
-                            console.log(`PageSpeed [${type}] - Attempting ${url}...`);
                             const res = await axios.get(url, { timeout: 45000 });
-                            if (res.data?.lighthouseResult || res.data?.loadingExperience) return res.data;
-                        } catch (e) {
-                            lastErr = e;
-                            console.warn(`PageSpeed [${type}] failed for ${url}:`, e.message);
-                        }
+                            if (res.data?.lighthouseResult) return res.data;
+                        } catch (e) { }
                     }
-                    throw lastErr || new Error('All PageSpeed attempts failed');
+                    throw new Error('All PageSpeed attempts failed');
                 };
 
-                withRetry(() => runAudit(normalizedDomain), {
-                    maxRetries: 2,
-                    initialDelay: 3000,
-                    onRetry: (count) => console.log(`Retrying PageSpeed [${type}] (${count}/2)...`)
-                }).then(data => {
+                withRetry(() => runAudit(targetDomain), { maxRetries: 2, initialDelay: 1000 }).then(data => {
                     if (activeSearchDomain.current === domain) {
                         if (type === 'mobile') setPageSpeedMobile(data);
                         else setPageSpeedDesktop(data);
                         if (!cache[currentSearch]) cache[currentSearch] = {};
                         cache[currentSearch][`pageSpeed_${type}`] = data;
                     }
-                }).catch(err => {
-                    console.error(`PageSpeed ${type} ultimate failure:`, err.message);
                 }).finally(() => {
                     if (activeSearchDomain.current === domain) {
                         psResolvedCount++;
-                        if (psResolvedCount === 2) {
-                            clearTimeout(safetyTimer);
-                            setPageSpeedLoading(false);
-                        }
+                        if (psResolvedCount === 2) setPageSpeedLoading(false);
                     }
                 });
             });
-        }
+        };
+
+        const normalizedDomain = currentSearch.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+        runPageSpeedAudit(normalizedDomain);
 
         // 1. Traffic API
         const fetchTraffic = async (targetDomain) => {
@@ -315,6 +324,114 @@ function App() {
 
         // Lusha is now manual - handled by handleLushaUnlock
         setLoading(false);
+        addToHistory(domain);
+    };
+
+    const copyToSheets = async () => {
+        if (!domain || !data) return;
+
+        const cleanD = domain.toLowerCase().trim();
+
+        // 1. Get History (Last 3 months sorted - raw numbers)
+        const visitsData = data.EstimatedMonthlyVisits || {};
+        const sortedMonths = Object.keys(visitsData).sort((a, b) => new Date(b) - new Date(a)).slice(0, 3);
+        const monthViews = sortedMonths.map(m => visitsData[m] || 0);
+        while (monthViews.length < 3) monthViews.push(0);
+
+        // 2. Traffic Metrics (raw numbers)
+        const engagements = data.Engagments || {};
+        const totalVisitsCount = engagements.Visits ? parseInt(engagements.Visits, 10) : (sortedMonths.length > 0 ? visitsData[sortedMonths[0]] : 0);
+        const ppv = engagements.PagePerVisit ? parseFloat(engagements.PagePerVisit) : 1.5;
+        const pageViews = totalVisitsCount ? Math.round(totalVisitsCount * ppv) : 0;
+
+        // 3. Performance
+        const perfMobile = pageSpeedMobile?.lighthouseResult?.categories?.performance?.score ? Math.round(pageSpeedMobile.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
+        const perfDesktop = pageSpeedDesktop?.lighthouseResult?.categories?.performance?.score ? Math.round(pageSpeedDesktop.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
+
+        // 4. Extract CMS and CDN (Case-insensitive)
+        const findTechNames = (catName) => {
+            const entry = Object.entries(techStack || {}).find(([k]) => k.toLowerCase() === catName.toLowerCase());
+            return entry ? entry[1].map(t => t.Name).join(', ').replace(/\t|\n/g, ' ') : 'None';
+        };
+
+        const cms = findTechNames('cms');
+        const cdn = findTechNames('cdn');
+
+        const finalHeaders = [
+            'Domain',
+            ...(sortedMonths.length > 0 ? sortedMonths.map(m => `Visits (${m})`) : ['Visits (M1)', 'Visits (M2)', 'Visits (M3)']),
+            'Latest Page Views',
+            'CMS',
+            'CDN',
+            'Perf (Mob)',
+            'Perf (Desk)'
+        ];
+
+        const values = [
+            cleanD,
+            ...monthViews,
+            pageViews,
+            cms,
+            cdn,
+            perfMobile,
+            perfDesktop
+        ];
+
+        const tsvString = [finalHeaders.join('\t'), values.join('\t')].join('\n');
+        try {
+            await navigator.clipboard.writeText(tsvString);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            console.error('Failed to copy: ', err);
+        }
+    };
+
+    const handleRetryPageSpeed = () => {
+        if (!domain) return;
+        const normalizedDomain = domain.toLowerCase().trim().replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '');
+
+        setPageSpeedLoading(true);
+        setPageSpeedStarted(true);
+        let psResolvedCount = 0;
+        const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || '';
+        const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
+
+        ['mobile', 'desktop'].forEach(type => {
+            const runAudit = async (targetDomain) => {
+                const tryUrls = [
+                    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
+                    `/api/pagespeed?domain=${targetDomain}&strategy=${type}&refresh=true`
+                ];
+
+                for (const url of tryUrls) {
+                    try {
+                        const res = await axios.get(url, { timeout: 45000 });
+                        if (res.data?.lighthouseResult) return res.data;
+                    } catch (e) { }
+                }
+                throw new Error('Retry failed');
+            };
+
+            // Clear current states and cache entries for this specific retry
+            if (type === 'mobile') setPageSpeedMobile(null);
+            else setPageSpeedDesktop(null);
+
+            const cleanSearch = domain.toLowerCase().trim();
+            if (cache[cleanSearch]) {
+                delete cache[cleanSearch][`pageSpeed_${type}`];
+            }
+
+            runAudit(normalizedDomain).then(data => {
+                if (type === 'mobile') setPageSpeedMobile(data);
+                else setPageSpeedDesktop(data);
+                if (cache[cleanSearch]) cache[cleanSearch][`pageSpeed_${type}`] = data;
+            }).catch(e => console.error(e)).finally(() => {
+                psResolvedCount++;
+                if (psResolvedCount === 2) setPageSpeedLoading(false);
+            });
+        });
     };
 
     const handleLushaUnlock = async () => {
@@ -474,36 +591,75 @@ function App() {
                 </button>
             </nav>
 
+            {/* Separate History Button (Top Right) */}
+            <div className="fixed top-6 right-6 z-40">
+                <button
+                    onClick={() => setIsHistoryOpen(true)}
+                    className="p-3 bg-slate-800/80 hover:bg-slate-700 backdrop-blur-md rounded-full border border-slate-700/50 text-slate-400 hover:text-indigo-400 transition-all duration-300 shadow-xl group"
+                    title="View History"
+                >
+                    <svg className="w-6 h-6 transition-transform group-hover:rotate-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </button>
+            </div>
+
             <main className={`w-full ${activeTab === 'bulk' ? 'max-w-6xl' : 'max-w-2xl'} flex flex-col items-center transition-all duration-500`}>
                 {activeTab === 'single' ? (
                     <>
-                        <form onSubmit={handleAnalyze} className="w-full mb-10 relative group">
-                            <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-cyan-400 rounded-lg blur opacity-25 group-hover:opacity-100 transition duration-1000 group-hover:duration-200"></div>
-                            <div className="relative flex items-center bg-slate-800 rounded-lg p-2 ring-1 ring-slate-700/50 shadow-2xl">
-                                <input
-                                    type="text"
-                                    className="flex-grow bg-transparent text-white placeholder-slate-500 px-4 py-3 focus:outline-none text-lg"
-                                    placeholder="e.g., google.com"
-                                    value={domain}
-                                    onChange={(e) => setDomain(e.target.value)}
-                                />
-                                <button
-                                    type="submit"
-                                    disabled={loading}
-                                    className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-md font-semibold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-indigo-500/30"
-                                >
-                                    {loading || trafficLoading || techLoading || lushaLoading ? (
-                                        <span className="flex items-center gap-2">
-                                            <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        <form onSubmit={handleAnalyze} className="w-full mb-10 relative group flex gap-3">
+                            <div className="relative flex-grow group">
+                                <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500 to-cyan-400 rounded-lg blur opacity-25 group-hover:opacity-100 transition duration-1000 group-hover:duration-200"></div>
+                                <div className="relative flex items-center bg-slate-800 rounded-lg ring-1 ring-slate-700/50 shadow-2xl">
+                                    <div className="flex items-center pl-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => loadFromHistory(historyIndex - 1)}
+                                            disabled={historyIndex <= 0}
+                                            className="p-2 text-slate-500 hover:text-indigo-400 transition-colors disabled:opacity-30 disabled:hover:text-slate-500"
+                                            title="Go Back"
+                                        >
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
                                             </svg>
-                                            Analyzing...
-                                        </span>
-                                    ) : (
-                                        'Analyze'
-                                    )}
-                                </button>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => loadFromHistory(historyIndex + 1)}
+                                            disabled={historyIndex >= searchHistory.length - 1}
+                                            className="p-2 text-slate-500 hover:text-indigo-400 transition-colors disabled:opacity-30 disabled:hover:text-slate-500"
+                                            title="Go Forward"
+                                        >
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                            </svg>
+                                        </button>
+                                    </div>
+                                    <input
+                                        type="text"
+                                        className="flex-grow bg-transparent text-white placeholder-slate-500 px-4 py-3 focus:outline-none text-lg"
+                                        placeholder="e.g., google.com"
+                                        value={domain}
+                                        onChange={(e) => setDomain(e.target.value)}
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={loading || trafficLoading || techLoading || lushaLoading}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-3 rounded-md font-semibold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-indigo-500/30 m-1"
+                                    >
+                                        {loading || trafficLoading || techLoading || lushaLoading ? (
+                                            <span className="flex items-center gap-2">
+                                                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                </svg>
+                                                Analyzing...
+                                            </span>
+                                        ) : (
+                                            'Analyze'
+                                        )}
+                                    </button>
+                                </div>
                             </div>
                         </form>
 
@@ -546,7 +702,18 @@ function App() {
                                                 Analysis for {new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
                                             </p>
                                         </div>
-                                        <span className="text-xs font-mono text-cyan-400 bg-cyan-400/10 px-2 py-1 rounded border border-cyan-400/20">LIVE DATA</span>
+                                        <div className="flex items-center gap-3">
+                                            <button
+                                                onClick={copyToSheets}
+                                                className={`text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 px-3 py-1.5 rounded-lg border ${copied ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400' : 'bg-slate-900/50 border-slate-700/50 text-slate-400 hover:text-white hover:border-slate-500'}`}
+                                            >
+                                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                                </svg>
+                                                {copied ? 'Copied!' : 'Copy to Sheets'}
+                                            </button>
+                                            <span className="text-xs font-mono text-cyan-400 bg-cyan-400/10 px-2 py-1 rounded border border-cyan-400/20">LIVE DATA</span>
+                                        </div>
                                     </div>
 
                                     <div className="p-6">
@@ -702,19 +869,14 @@ function App() {
                             </div>
                         )}
 
-                        {pageSpeedLoading && !pageSpeedMobile && !pageSpeedDesktop && (
-                            <div className="w-full mt-8 bg-slate-800/50 backdrop-blur-md rounded-2xl border border-indigo-500/30 p-8 text-center animate-pulse">
-                                <div className="flex flex-col items-center gap-4">
-                                    <div className="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
-                                    <div>
-                                        <h3 className="text-lg font-bold text-white">Running Google PageSpeed Audit</h3>
-                                        <p className="text-slate-400 text-sm mt-1">Analyzing both Mobile and Desktop performance (~1 min)...</p>
-                                    </div>
-                                </div>
-                            </div>
+                        {pageSpeedStarted && (
+                            <PageSpeedResults
+                                mobileData={pageSpeedMobile}
+                                desktopData={pageSpeedDesktop}
+                                onRetry={handleRetryPageSpeed}
+                                loading={pageSpeedLoading}
+                            />
                         )}
-
-                        <PageSpeedResults mobileData={pageSpeedMobile} desktopData={pageSpeedDesktop} />
 
                         {/* Manual Lusha Unlock Button */}
                         {!lushaRequested && !lushaData && !lushaLoading && (data || techStack) && (
@@ -758,13 +920,123 @@ function App() {
                     <BulkAnalyzer />
                 )}
             </main>
+
+            {/* History Drawer */}
+            {isHistoryOpen && (
+                <div className="fixed inset-0 z-50 overflow-hidden">
+                    <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm transition-opacity" onClick={() => setIsHistoryOpen(false)}></div>
+                    <div className="absolute inset-y-0 right-0 max-w-full flex">
+                        <div className="w-screen max-w-md bg-slate-800 shadow-2xl flex flex-col animate-slide-left">
+                            <div className="px-6 py-6 bg-slate-900 border-b border-slate-700 flex items-center justify-between">
+                                <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                                    <svg className="w-6 h-6 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    Search History
+                                </h3>
+                                <button
+                                    onClick={() => setIsHistoryOpen(false)}
+                                    className="text-slate-400 hover:text-white transition-colors"
+                                >
+                                    <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            </div>
+                            <div className="flex-grow overflow-y-auto p-6 space-y-4">
+                                {searchHistory.length === 0 ? (
+                                    <div className="text-center py-20">
+                                        <div className="w-16 h-16 bg-slate-700/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                                            <svg className="w-8 h-8 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                            </svg>
+                                        </div>
+                                        <p className="text-slate-400 font-medium">No history yet</p>
+                                        <p className="text-slate-500 text-xs mt-1">Domains you analyze will appear here.</p>
+                                    </div>
+                                ) : (
+                                    [...searchHistory].reverse().map((histDomain, revIdx) => {
+                                        const idx = searchHistory.length - 1 - revIdx;
+                                        const isActive = historyIndex === idx;
+                                        return (
+                                            <button
+                                                key={idx}
+                                                onClick={() => {
+                                                    loadFromHistory(idx);
+                                                    setIsHistoryOpen(false);
+                                                }}
+                                                className={`w-full text-left p-4 rounded-xl border transition-all duration-300 flex items-center justify-between group ${isActive
+                                                    ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                                                    : 'bg-slate-700/30 border-slate-700 hover:border-slate-500 text-slate-300 hover:bg-slate-700/50'
+                                                    }`}
+                                            >
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`w-2 h-2 rounded-full ${isActive ? 'bg-indigo-400 animate-pulse' : 'bg-slate-600'}`}></div>
+                                                    <span className="font-bold truncate max-w-[200px]">{histDomain}</span>
+                                                </div>
+                                                <svg className={`w-5 h-5 transition-transform duration-300 ${isActive ? 'text-indigo-400' : 'text-slate-600 group-hover:translate-x-1'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                                                </svg>
+                                            </button>
+                                        );
+                                    })
+                                )}
+                            </div>
+                            <div className="p-6 bg-slate-900/50 border-t border-slate-700 text-center">
+                                <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest">History stored in this session</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
 
-const PageSpeedResults = ({ mobileData, desktopData }) => {
+function PageSpeedResults({ mobileData, desktopData, onRetry, loading }) {
     const [strategy, setStrategy] = useState('mobile');
     const data = strategy === 'mobile' ? mobileData : desktopData;
+
+    if (loading && !mobileData && !desktopData) {
+        return (
+            <div className="w-full mt-8 bg-slate-800/50 backdrop-blur-md rounded-2xl border border-indigo-500/30 p-8 text-center animate-pulse">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+                    <div>
+                        <h3 className="text-lg font-bold text-white">Running Google PageSpeed Audit</h3>
+                        <p className="text-slate-400 text-sm mt-1">Analyzing both Mobile and Desktop performance (~1 min)...</p>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    if (!mobileData && !desktopData && !loading) {
+        return (
+            <div className="w-full mt-8 bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 p-8 text-center animate-slide-up">
+                <div className="flex flex-col items-center gap-4">
+                    <div className="w-12 h-12 bg-slate-700/50 rounded-full flex items-center justify-center">
+                        <svg className="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 className="text-lg font-bold text-white">Performance Audit Failed</h3>
+                        <p className="text-slate-400 text-sm mt-1">We couldn't retrieve PageSpeed data for this domain.</p>
+                        <button
+                            onClick={onRetry}
+                            className="mt-4 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 px-6 py-2 rounded-lg text-sm font-bold transition-all flex items-center gap-2 mx-auto"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                            Retry Performance Audit
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     if (!mobileData && !desktopData) return null;
 
@@ -796,34 +1068,119 @@ const PageSpeedResults = ({ mobileData, desktopData }) => {
         return 'text-red-400';
     };
 
+    const getStatusBg = (cat) => {
+        if (!cat) return 'bg-slate-400/10';
+        const c = cat.toUpperCase();
+        if (c === 'FAST' || c === 'GOOD') return 'bg-emerald-400/10';
+        if (c === 'AVERAGE' || c === 'NEEDS_IMPROVEMENT') return 'bg-amber-400/10';
+        return 'bg-red-400/10';
+    };
+
+    const MetricCard = ({ metric, isMain = true }) => {
+        const m = metrics?.[metric.id];
+        const val = m ? (m.percentile / metric.divisor).toFixed(metric.divisor === 1 ? (metric.id.includes('SCORE') ? 2 : 0) : 1) : '—';
+        const category = m?.category || 'N/A';
+        const colorClass = getStatusColor(category);
+
+        // Progress bar logic
+        const getProgress = () => {
+            if (category === 'FAST' || category === 'GOOD') return '30%';
+            if (category === 'AVERAGE' || category === 'NEEDS_IMPROVEMENT') return '65%';
+            if (category === 'SLOW' || category === 'POOR') return '95%';
+            return '0%';
+        };
+
+        const getBarGradient = () => {
+            return `linear-gradient(to right, #10b981 0%, #10b981 33.33%, #fbbf24 33.33%, #fbbf24 66.66%, #ef4444 66.66%, #ef4444 100%)`;
+        };
+
+        if (!isMain) {
+            return (
+                <div className="bg-slate-900/40 rounded-xl p-6 border border-slate-700/20 flex justify-between items-center">
+                    <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">{metric.label} ({metric.short})</h4>
+                    <p className={`text-2xl font-black ${colorClass}`}>
+                        {val} <span className="text-xs font-normal text-slate-500 ml-0.5">{metric.unit}</span>
+                    </p>
+                </div>
+            );
+        }
+
+        return (
+            <div className="bg-slate-900/40 rounded-xl p-6 border border-slate-700/20 flex flex-col">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">{metric.label} ({metric.short})</h4>
+                <div className="flex items-baseline gap-1 mt-2 mb-4">
+                    <span className={`text-4xl font-black ${colorClass}`}>{val}</span>
+                    <span className="text-sm font-normal text-slate-500">{metric.unit}</span>
+                </div>
+
+                {/* Progress Bar Container */}
+                <div className="relative h-1.5 w-full rounded-full overflow-hidden mb-2" style={{ background: '#1e293b' }}>
+                    <div className="absolute inset-0 z-0 h-full w-full" style={{ background: getBarGradient(), opacity: 0.8 }} />
+                    {/* Indicator */}
+                    <div
+                        className="absolute h-full w-1.5 bg-white z-10 shadow-[0_0_8px_rgba(255,255,255,0.8)] transition-all duration-1000"
+                        style={{ left: `calc(${getProgress()} - 0.75px)` }}
+                    />
+                </div>
+
+                <div className="flex justify-between text-[8px] font-black text-slate-600 uppercase tracking-widest mb-6">
+                    <span>Good</span>
+                    <span>Poor</span>
+                </div>
+
+                <div className="mt-auto pt-4 border-t border-slate-800/50 flex justify-between items-center">
+                    <div>
+                        <p className="text-[8px] font-black text-slate-600 uppercase tracking-widest leading-tight">75th Percentile -</p>
+                        <p className="text-[10px] font-bold text-slate-500">{val}{metric.unit}</p>
+                    </div>
+                    {(category === 'FAST' || category === 'GOOD') && (
+                        <span className="text-[8px] font-black text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded border border-emerald-400/20 tracking-tighter">FAST</span>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
     const cwvis = [
-        { id: 'LARGEST_CONTENTFUL_PAINT_MS', label: 'LCP', unit: 's', divisor: 1000, desc: 'Largest Contentful Paint' },
-        { id: 'FIRST_INPUT_DELAY_MS', label: 'FID', unit: 'ms', divisor: 1, desc: 'First Input Delay' },
-        { id: 'CUMULATIVE_LAYOUT_SHIFT_SCORE', label: 'CLS', unit: '', divisor: 100, desc: 'Cumulative Layout Shift' },
+        { id: 'LARGEST_CONTENTFUL_PAINT_MS', label: 'Largest Contentful Paint', short: 'LCP', unit: 's', divisor: 1000 },
+        { id: 'INTERACTION_TO_NEXT_PAINT', label: 'Interaction to Next Paint', short: 'INP', unit: 'ms', divisor: 1 },
+        { id: 'CUMULATIVE_LAYOUT_SHIFT_SCORE', label: 'Cumulative Layout Shift', short: 'CLS', unit: '', divisor: 100 },
     ];
 
     const notableMetrics = [
-        { id: 'FIRST_CONTENTFUL_PAINT_MS', label: 'First Contentful Paint', unit: 's', divisor: 1000 },
-        { id: 'INTERACTION_TO_NEXT_PAINT', label: 'Interaction to Next Paint', unit: 'ms', divisor: 1 },
+        { id: 'FIRST_CONTENTFUL_PAINT_MS', label: 'FIRST CONTENTFUL PAINT', short: 'FCP', unit: 's', divisor: 1000 },
+        { id: 'EXPERIMENTAL_TIME_TO_FIRST_BYTE', label: 'TIME TO FIRST BYTE', short: 'TTFB', unit: 's', divisor: 1000 },
     ];
 
     return (
         <div className="w-full mt-8 animate-slide-up">
-            <div className="bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
-                <div className="p-6 border-b border-slate-700/50 flex justify-between items-center bg-gradient-to-r from-slate-800 to-slate-900">
-                    <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                        <span className="w-2 h-6 bg-emerald-400 rounded-full"></span>
-                        PageSpeed Insights
-                    </h2>
-                    <div className="flex items-center gap-3">
-                        <span className={`text-xs font-black uppercase tracking-widest px-3 py-1 rounded-full border ${overallStatus === 'Passed' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : overallStatus === 'Needs Improvement' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30'}`}>
-                            {overallStatus}
-                        </span>
-                        <div className="flex bg-slate-900/50 rounded-lg p-0.5 border border-slate-700/50">
+            <div className="bg-slate-800/80 backdrop-blur-md rounded-3xl border border-slate-700/50 shadow-2xl overflow-hidden">
+                {/* Header Section */}
+                <div className="p-8 pb-4">
+                    <div className="flex justify-between items-start mb-6">
+                        <div className="flex items-center gap-5">
+                            <div className="w-14 h-14 rounded-full bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                                <svg className="w-7 h-7 text-emerald-400" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h2 className="text-2xl font-black text-white tracking-tight">Core Web Vitals Assessment</h2>
+                                <div className="flex items-center gap-3 mt-1">
+                                    <span className={`text-base font-bold ${getStatusColor(overallCategory)}`}>{overallStatus}</span>
+                                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] pt-0.5">Performance Score: <span className={getStatusColor(overallCategory)}>{data ? Math.round(data.lighthouseResult?.categories?.performance?.score * 100) : '—'}%</span></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex bg-slate-900/80 rounded-xl p-1 border border-slate-700/50">
                             {['mobile', 'desktop'].map(s => (
-                                <button key={s} onClick={() => setStrategy(s)}
-                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${strategy === s ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}>
-                                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                                <button
+                                    key={s}
+                                    onClick={() => setStrategy(s)}
+                                    className={`px-5 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${strategy === s ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
+                                >
+                                    {s}
                                 </button>
                             ))}
                         </div>
@@ -831,50 +1188,32 @@ const PageSpeedResults = ({ mobileData, desktopData }) => {
                 </div>
 
                 {!data ? (
-                    <div className="p-8 text-center text-slate-500 text-sm italic">
-                        No {strategy} data available.
+                    <div className="px-8 pb-12 text-center text-slate-500 text-sm italic">
+                        No {strategy} data available for this domain.
                     </div>
                 ) : (
-                    <div className="p-6">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="px-8 pb-8">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
                             {cwvis.map(m => (
-                                <div key={m.id} className="bg-slate-900/40 rounded-xl p-5 border border-slate-700/20">
-                                    <div className="flex justify-between items-start mb-3">
-                                        <div>
-                                            <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">{m.label}</p>
-                                            <p className="text-[9px] text-slate-600">{m.desc}</p>
-                                        </div>
-                                        <span className={`text-[10px] font-black uppercase tracking-tighter px-1.5 py-0.5 rounded ${getStatusColor(metrics?.[m.id]?.category)} bg-current/10`}>
-                                            {metrics?.[m.id]?.category?.replace('_', ' ') || 'N/A'}
-                                        </span>
-                                    </div>
-                                    <p className={`text-3xl font-black ${getStatusColor(metrics?.[m.id]?.category)}`}>
-                                        {metrics?.[m.id] ? (metrics?.[m.id]?.percentile / m.divisor).toFixed(m.divisor === 1 ? 0 : 1) : '—'}
-                                        <span className="text-sm font-normal text-slate-500 ml-1">{m.unit}</span>
-                                    </p>
-                                </div>
+                                <MetricCard key={m.id} metric={m} />
                             ))}
                         </div>
 
-                        <div className="mt-6">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="mb-4">
+                            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">Other Notable Metrics</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 {notableMetrics.map(m => (
-                                    <div key={m.id} className="flex justify-between items-center p-4 bg-slate-900/40 rounded-xl border border-slate-700/20">
-                                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-tighter">{m.label}</h4>
-                                        <span className={`text-xl font-black ${getStatusColor(metrics?.[m.id]?.category)}`}>
-                                            {metrics?.[m.id] ? (metrics?.[m.id]?.percentile / m.divisor).toFixed(m.divisor === 1 ? 0 : 1) : '—'}
-                                            <span className="text-[10px] text-slate-500 font-bold ml-1">{m.unit}</span>
-                                        </span>
-                                    </div>
+                                    <MetricCard key={m.id} metric={m} isMain={false} />
                                 ))}
                             </div>
                         </div>
                     </div>
                 )}
 
-                <div className="px-6 py-4 bg-slate-900/50 flex justify-between items-center border-t border-slate-700/50">
-                    <span className="text-[9px] text-slate-600 font-bold uppercase tracking-widest italic">Lighthouse Engine {data?.lighthouseResult?.lighthouseVersion || '...'}</span>
-                    <span className="text-[9px] text-slate-600 font-bold uppercase tracking-widest">Performance Score: <span className={getStatusColor(overallCategory)}>{data ? Math.round(data.lighthouseResult?.categories?.performance?.score * 100) : '—'}%</span></span>
+                {/* Footer */}
+                <div className="px-8 py-5 bg-slate-900/80 flex justify-between items-center border-t border-slate-700/50">
+                    <span className="text-[9px] text-slate-600 font-black uppercase tracking-[0.2em] italic">Lighthouse Engine {data?.lighthouseResult?.lighthouseVersion || '13.0.1'}</span>
+                    <span className="text-[9px] text-slate-600 font-black uppercase tracking-[0.2em]">Performance Score: <span className={getStatusColor(overallCategory)}>{data ? Math.round(data.lighthouseResult?.categories?.performance?.score * 100) : '—'}%</span></span>
                 </div>
             </div>
         </div>

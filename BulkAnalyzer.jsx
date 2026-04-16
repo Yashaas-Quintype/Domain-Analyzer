@@ -8,6 +8,7 @@ const BulkAnalyzer = () => {
     const [results, setResults] = useState({});
     const [processing, setProcessing] = useState(false);
     const [progress, setProgress] = useState(0);
+    const [copied, setCopied] = useState(false);
     const fileInputRef = useRef(null);
 
     const [expandedDomains, setExpandedDomains] = useState(new Set());
@@ -165,6 +166,11 @@ const BulkAnalyzer = () => {
                         count: formatNumber(visitsData[date])
                     }));
 
+                    const last3MonthsRaw = dates.slice(0, 3).map(date => ({
+                        date,
+                        count: visitsData[date] || 0
+                    }));
+
                     const techList = techRes?.data?.Results?.[0]?.Result?.Paths?.flatMap(p => p.Technologies) ||
                         techRes?.data?.Results?.[0]?.Result?.Technologies || [];
 
@@ -174,7 +180,9 @@ const BulkAnalyzer = () => {
                         domain,
                         visits: formatNumber(totalVisits),
                         pageViews: formatNumber(pageViews),
+                        rawPageViews: pageViews || 0,
                         history: last3Months,
+                        rawHistory: last3MonthsRaw,
                         cms: techInfo.cms,
                         cdn: techInfo.cdn,
                         fullTech: processTech(techList),
@@ -268,6 +276,59 @@ const BulkAnalyzer = () => {
         URL.revokeObjectURL(url);
     };
 
+    const copyToSheets = async () => {
+        const allMonths = new Set();
+        domains.forEach(d => {
+            if (results[d]?.history) {
+                results[d].history.forEach(h => allMonths.add(h.date));
+            }
+        });
+        const sortedMonths = Array.from(allMonths).sort().reverse().slice(0, 3);
+
+        const headers = [
+            'Domain',
+            ...sortedMonths.map(m => `Visits (${m})`),
+            'Latest Page Views',
+            'CMS',
+            'CDN'
+        ];
+
+        const rows = domains.map(d => {
+            const res = results[d] || {};
+            const rawTech = res.rawTech || [];
+            const cmsList = rawTech.filter(t => (t.Tag || '').toLowerCase().includes('cms')).map(t => t.Name);
+            const cdnList = rawTech.filter(t => {
+                const cat = (t.Tag || '').toLowerCase();
+                const name = (t.Name || '').toLowerCase();
+                return cat.includes('cdn') || name.includes('content delivery network');
+            }).map(t => t.Name);
+
+            const monthViews = sortedMonths.map(month => {
+                const match = res.rawHistory?.find(h => h.date === month);
+                return match ? match.count : 0;
+            });
+
+            return [
+                d,
+                ...monthViews,
+                res.rawPageViews || 0,
+                [...new Set(cmsList)].slice(0, 2).join(', ') || 'None',
+                [...new Set(cdnList)].slice(0, 2).join(', ') || 'None'
+            ];
+        });
+
+        const tsvString = [headers, ...rows].map(row => row.join('\t')).join('\n');
+
+        try {
+            await navigator.clipboard.writeText(tsvString);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            console.error('Failed to copy: ', err);
+            alert('Failed to copy to clipboard');
+        }
+    };
+
     return (
         <div className="w-full animate-slide-up">
             <div className="bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden p-6">
@@ -341,15 +402,26 @@ const BulkAnalyzer = () => {
                     <div className="mt-8">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-lg font-bold text-white">Results ({domains.length})</h3>
-                            <button
-                                onClick={downloadCSV}
-                                className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors flex items-center gap-1 bg-cyan-400/10 px-3 py-1.5 rounded-md border border-cyan-400/20"
-                            >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                                </svg>
-                                Export CSV
-                            </button>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={downloadCSV}
+                                    className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors flex items-center gap-1 bg-cyan-400/10 px-3 py-1.5 rounded-md border border-cyan-400/20"
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                    </svg>
+                                    Export CSV
+                                </button>
+                                <button
+                                    onClick={copyToSheets}
+                                    className={`text-xs font-semibold transition-all flex items-center gap-1 px-3 py-1.5 rounded-md border ${copied ? 'bg-green-500/20 border-green-500/50 text-green-400' : 'bg-green-400/10 border-green-400/20 text-green-400 hover:text-green-300'}`}
+                                >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                    </svg>
+                                    {copied ? 'Copied!' : 'Copy for Sheets'}
+                                </button>
+                            </div>
                         </div>
 
                         <div className="overflow-x-auto rounded-xl border border-slate-700/50">
@@ -470,7 +542,7 @@ const BulkAnalyzer = () => {
                     </div>
                 )}
             </div>
-        </div>
+        </div >
     );
 };
 
