@@ -115,7 +115,6 @@ function App() {
 
     const addToHistory = (newDomain) => {
         const cleanDomain = newDomain.toLowerCase().trim();
-        // Don't add if it's the same as the current history item
         if (historyIndex >= 0 && searchHistory[historyIndex].toLowerCase().trim() === cleanDomain) return;
 
         const newHistory = [...searchHistory.slice(0, historyIndex + 1), newDomain];
@@ -163,7 +162,6 @@ function App() {
         setTrafficLoading(true);
         setTechLoading(true);
 
-        // Set active domain for race condition handling
         activeSearchDomain.current = domain;
         cache[cleanSearch] = { traffic: null, tech: null, lusha: null, scraped: null };
 
@@ -173,20 +171,20 @@ function App() {
         const runPageSpeedAudit = (targetDomain) => {
             setPageSpeedLoading(true);
             let psResolvedCount = 0;
-            const PSI_KEY = import.meta.env.VITE_PAGESPEED_KEY || 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
+            const PSI_KEY = 'AIzaSyAwLB1oZ9dO36LsDzWdBiknSRtLmYOAoCw';
             const PSI_FIELDS = 'lighthouseResult/categories/performance/score,lighthouseResult/audits/first-contentful-paint,lighthouseResult/audits/largest-contentful-paint,lighthouseResult/audits/cumulative-layout-shift,lighthouseResult/audits/total-blocking-time,lighthouseResult/audits/speed-index';
 
             ['mobile', 'desktop'].forEach(type => {
-                const runAudit = async (d) => {
+                const runAudit = async (domainToAudit) => {
                     const tryUrls = [
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${d}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                        `/api/pagespeed?domain=${d}&strategy=${type}`
+                        'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://' + domainToAudit + '/&key=' + PSI_KEY + '&category=performance&strategy=' + type + '&fields=' + encodeURIComponent(PSI_FIELDS),
+                        'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.' + domainToAudit + '/&key=' + PSI_KEY + '&category=performance&strategy=' + type + '&fields=' + encodeURIComponent(PSI_FIELDS),
+                        '/api/pagespeed?domain=' + domainToAudit + '&strategy=' + type
                     ];
                     for (const url of tryUrls) {
                         try {
                             const res = await axios.get(url, { timeout: 45000 });
-                            if (res.data?.lighthouseResult) return res.data;
+                            if (res.data && res.data.lighthouseResult) return res.data;
                         } catch (e) { }
                     }
                     throw new Error('All PageSpeed attempts failed');
@@ -197,7 +195,7 @@ function App() {
                         if (type === 'mobile') setPageSpeedMobile(data);
                         else setPageSpeedDesktop(data);
                         if (!cache[currentSearch]) cache[currentSearch] = {};
-                        cache[currentSearch][`pageSpeed_${type}`] = data;
+                        cache[currentSearch]['pageSpeed_' + type] = data;
                     }
                 }).finally(() => {
                     if (activeSearchDomain.current === domain) {
@@ -214,13 +212,13 @@ function App() {
         // 1. Traffic API
         const fetchTraffic = async (targetDomain) => {
             const normalized = targetDomain.replace(/^www\./i, '');
-            return withRetry(() => axios.get(`/api/zyla/api/29/site+traffic+api/93/traffic+source+and+overview`, {
+            return withRetry(() => axios.get('/api/zyla/api/29/site+traffic+api/93/traffic+source+and+overview', {
                 params: { domain: normalized },
-                headers: { 'Authorization': `Bearer ${import.meta.env.VITE_ZYLALABS_KEY || '10095|mmrDs2Whvlc7fD1JKYF2CasMOSaDUZxnVkqhHEzp'}` },
+                headers: { 'Authorization': 'Bearer 10095|mmrDs2Whvlc7fD1JKYF2CasMOSaDUZxnVkqhHEzp' },
                 timeout: 25000
             }), {
                 maxRetries: 3,
-                onRetry: (count) => setRetryingStatus(`Retrying Traffic API (${count}/3)...`)
+                onRetry: (count) => setRetryingStatus('Retrying Traffic API (' + count + '/3)...')
             });
         };
 
@@ -233,7 +231,7 @@ function App() {
 
             if (!hasTrafficData(trafficData) && domain.split('.').length > 2) {
                 const root = getDomainRoot(domain);
-                console.log(`No direct traffic found for ${domain}. Trying root: ${root}`);
+                console.log('No direct traffic found for ' + domain + '. Trying root: ' + root);
                 try {
                     const rootRes = await fetchTraffic(root);
                     if (hasTrafficData(rootRes.data)) {
@@ -250,7 +248,7 @@ function App() {
                     cache[currentSearch].traffic = trafficData;
                     setRetryingStatus(null);
                 } else {
-                    console.warn(`Zylalabs returned no traffic data for ${domain} or its root.`);
+                    console.warn('Zylalabs returned no traffic data for ' + domain + ' or its root.');
                     setData(null);
                 }
             }
@@ -263,20 +261,20 @@ function App() {
             }
         }).finally(() => {
             const currentRelevant = activeSearchDomain.current === domain ||
-                (cache[currentSearch]?.scraped?.potentialParentWebsites?.includes(activeSearchDomain.current));
+                (cache[currentSearch] && cache[currentSearch].scraped && cache[currentSearch].scraped.potentialParentWebsites && cache[currentSearch].scraped.potentialParentWebsites.includes(activeSearchDomain.current));
             if (currentRelevant) setTrafficLoading(false);
         });
 
         // 2. BuiltWith API
         const fetchBuiltWith = async (targetDomain) => {
-            console.log(`Attempting BuiltWith lookup for: ${targetDomain}`);
-            return withRetry(() => axios.get(`/api/builtwith/v22/api.json`, {
+            console.log('Attempting BuiltWith lookup for: ' + targetDomain);
+            return withRetry(() => axios.get('/api/builtwith/v22/api.json', {
                 params: {
-                    KEY: import.meta.env.VITE_BUILTWITH_KEY || 'ea894525-80c8-4320-b284-44f5eb507593',
+                    KEY: 'ea894525-80c8-4320-b284-44f5eb507593',
                     LOOKUP: targetDomain
                 }
             }), {
-                onRetry: (count) => setRetryingStatus(`Retrying Tech Stack API (${count}/3)...`)
+                onRetry: (count) => setRetryingStatus('Retrying Tech Stack API (' + count + '/3)...')
             });
         };
 
@@ -284,24 +282,24 @@ function App() {
             if (activeSearchDomain.current !== domain) return;
 
             console.log("BuiltWith raw response:", res.data);
-            let results = res.data?.Results;
+            let results = res.data && res.data.Results;
 
             const getTechList = (resObj) => {
                 if (!resObj) return null;
-                const pathTechs = resObj.Result?.Paths?.flatMap(p => p.Technologies) || [];
-                const topLevelTechs = resObj.Result?.Technologies || [];
+                const pathTechs = (resObj.Result && resObj.Result.Paths) ? resObj.Result.Paths.flatMap(p => p.Technologies) : [];
+                const topLevelTechs = (resObj.Result && resObj.Result.Technologies) ? resObj.Result.Technologies : [];
                 const combined = [...pathTechs, ...topLevelTechs];
                 return combined.length > 0 ? combined : null;
             };
 
-            let techList = getTechList(results?.[0]);
+            let techList = getTechList(results && results[0]);
 
             if (!techList && domain.split('.').length > 2) {
                 const root = getDomainRoot(domain);
-                console.log(`No data found for ${domain}. Retrying with root domain: ${root}`);
+                console.log('No data found for ' + domain + '. Retrying with root domain: ' + root);
                 const rootRes = await fetchBuiltWith(root);
-                results = rootRes.data?.Results;
-                techList = getTechList(results?.[0]);
+                results = rootRes.data && rootRes.data.Results;
+                techList = getTechList(results && results[0]);
             }
 
             if (techList) {
@@ -310,7 +308,7 @@ function App() {
                 cache[currentSearch].tech = tech;
                 setRetryingStatus(null);
             } else {
-                console.warn(`BuiltWith returned no technology data for ${domain} or its root.`);
+                console.warn('BuiltWith returned no technology data for ' + domain + ' or its root.');
                 setTechStack(null);
             }
         }).catch(err => {
@@ -318,11 +316,10 @@ function App() {
             setTechStack(null);
         }).finally(() => {
             const currentRelevant = activeSearchDomain.current === domain ||
-                (cache[currentSearch]?.scraped?.potentialParentWebsites?.includes(activeSearchDomain.current));
+                (cache[currentSearch] && cache[currentSearch].scraped && cache[currentSearch].scraped.potentialParentWebsites && cache[currentSearch].scraped.potentialParentWebsites.includes(activeSearchDomain.current));
             if (currentRelevant) setTechLoading(false);
         });
 
-        // Lusha is now manual - handled by handleLushaUnlock
         setLoading(false);
         addToHistory(domain);
     };
@@ -332,23 +329,19 @@ function App() {
 
         const cleanD = domain.toLowerCase().trim();
 
-        // 1. Get History (Last 3 months sorted - raw numbers)
         const visitsData = data.EstimatedMonthlyVisits || {};
         const sortedMonths = Object.keys(visitsData).sort((a, b) => new Date(b) - new Date(a)).slice(0, 3);
         const monthViews = sortedMonths.map(m => visitsData[m] || 0);
         while (monthViews.length < 3) monthViews.push(0);
 
-        // 2. Traffic Metrics (raw numbers)
         const engagements = data.Engagments || {};
         const totalVisitsCount = engagements.Visits ? parseInt(engagements.Visits, 10) : (sortedMonths.length > 0 ? visitsData[sortedMonths[0]] : 0);
         const ppv = engagements.PagePerVisit ? parseFloat(engagements.PagePerVisit) : 1.5;
         const pageViews = totalVisitsCount ? Math.round(totalVisitsCount * ppv) : 0;
 
-        // 3. Performance
-        const perfMobile = pageSpeedMobile?.lighthouseResult?.categories?.performance?.score ? Math.round(pageSpeedMobile.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
-        const perfDesktop = pageSpeedDesktop?.lighthouseResult?.categories?.performance?.score ? Math.round(pageSpeedDesktop.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
+        const perfMobile = pageSpeedMobile && pageSpeedMobile.lighthouseResult && pageSpeedMobile.lighthouseResult.categories && pageSpeedMobile.lighthouseResult.categories.performance && pageSpeedMobile.lighthouseResult.categories.performance.score ? Math.round(pageSpeedMobile.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
+        const perfDesktop = pageSpeedDesktop && pageSpeedDesktop.lighthouseResult && pageSpeedDesktop.lighthouseResult.categories && pageSpeedDesktop.lighthouseResult.categories.performance && pageSpeedDesktop.lighthouseResult.categories.performance.score ? Math.round(pageSpeedDesktop.lighthouseResult.categories.performance.score * 100) + '%' : 'N/A';
 
-        // 4. Extract CMS and CDN (Case-insensitive)
         const findTechNames = (catName) => {
             const entry = Object.entries(techStack || {}).find(([k]) => k.toLowerCase() === catName.toLowerCase());
             return entry ? entry[1].map(t => t.Name).join(', ').replace(/\t|\n/g, ' ') : 'None';
@@ -359,7 +352,7 @@ function App() {
 
         const finalHeaders = [
             'Domain',
-            ...(sortedMonths.length > 0 ? sortedMonths.map(m => `Visits (${m})`) : ['Visits (M1)', 'Visits (M2)', 'Visits (M3)']),
+            ...(sortedMonths.length > 0 ? sortedMonths.map(m => 'Visits (' + m + ')') : ['Visits (M1)', 'Visits (M2)', 'Visits (M3)']),
             'Latest Page Views',
             'CMS',
             'CDN',
@@ -400,33 +393,32 @@ function App() {
         ['mobile', 'desktop'].forEach(type => {
             const runAudit = async (targetDomain) => {
                 const tryUrls = [
-                    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.${targetDomain}/&key=${PSI_KEY}&category=performance&strategy=${type}&fields=${encodeURIComponent(PSI_FIELDS)}`,
-                    `/api/pagespeed?domain=${targetDomain}&strategy=${type}&refresh=true`
+                    'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://' + targetDomain + '/&key=' + PSI_KEY + '&category=performance&strategy=' + type + '&fields=' + encodeURIComponent(PSI_FIELDS),
+                    'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https://www.' + targetDomain + '/&key=' + PSI_KEY + '&category=performance&strategy=' + type + '&fields=' + encodeURIComponent(PSI_FIELDS),
+                    '/api/pagespeed?domain=' + targetDomain + '&strategy=' + type + '&refresh=true'
                 ];
 
                 for (const url of tryUrls) {
                     try {
                         const res = await axios.get(url, { timeout: 45000 });
-                        if (res.data?.lighthouseResult) return res.data;
+                        if (res.data && res.data.lighthouseResult) return res.data;
                     } catch (e) { }
                 }
                 throw new Error('Retry failed');
             };
 
-            // Clear current states and cache entries for this specific retry
             if (type === 'mobile') setPageSpeedMobile(null);
             else setPageSpeedDesktop(null);
 
             const cleanSearch = domain.toLowerCase().trim();
             if (cache[cleanSearch]) {
-                delete cache[cleanSearch][`pageSpeed_${type}`];
+                delete cache[cleanSearch]['pageSpeed_' + type];
             }
 
             runAudit(normalizedDomain).then(data => {
                 if (type === 'mobile') setPageSpeedMobile(data);
                 else setPageSpeedDesktop(data);
-                if (cache[cleanSearch]) cache[cleanSearch][`pageSpeed_${type}`] = data;
+                if (cache[cleanSearch]) cache[cleanSearch]['pageSpeed_' + type] = data;
             }).catch(e => console.error(e)).finally(() => {
                 psResolvedCount++;
                 if (psResolvedCount === 2) setPageSpeedLoading(false);
@@ -443,7 +435,7 @@ function App() {
         const currentSearch = domain.toLowerCase().trim();
 
         searchDecisionMakers(domain, {
-            onRetry: (status) => setRetryingStatus(`Retrying: ${status}`)
+            onRetry: (status) => setRetryingStatus('Retrying: ' + status)
         })
             .then(async (lushaResults) => {
                 if (activeSearchDomain.current !== domain) return;
@@ -471,7 +463,7 @@ function App() {
                         };
 
                         if (KB[cleanD]) {
-                            scraperData = { ...KB[cleanD], parentWebsite: KB[cleanD].potentialParentWebsites[0] };
+                            scraperData = Object.assign({}, KB[cleanD], { parentWebsite: KB[cleanD].potentialParentWebsites[0] });
                         } else {
                             try {
                                 const res = await axios.get('/api/scrape', { params: { domain }, timeout: 5000 });
@@ -497,7 +489,7 @@ function App() {
 
                                     try {
                                         const parentLushaResults = await searchDecisionMakers(parent, {
-                                            onRetry: (status) => setRetryingStatus(`Retrying Parent (${parent}): ${status}`),
+                                            onRetry: (status) => setRetryingStatus('Retrying Parent (' + parent + '): ' + status),
                                             isParent: true,
                                             companyName: scraperData.name
                                         });
@@ -517,7 +509,7 @@ function App() {
 
                             const currentLushaData = cache[currentSearch].lusha;
                             if ((!currentLushaData || !currentLushaData.contacts || currentLushaData.contacts.length === 0) && scraperData.name) {
-                                setRedirectingParent(`Name: ${scraperData.name}`);
+                                setRedirectingParent('Name: ' + scraperData.name);
                                 setLushaLoading(true);
 
                                 try {
@@ -527,7 +519,7 @@ function App() {
                                     });
 
                                     if (nameResults && nameResults.contacts && nameResults.contacts.length > 0) {
-                                        if (activeSearchDomain.current === domain || scraperData.potentialParentWebsites?.includes(activeSearchDomain.current)) {
+                                        if (activeSearchDomain.current === domain || (scraperData.potentialParentWebsites && scraperData.potentialParentWebsites.includes(activeSearchDomain.current))) {
                                             setLushaData(nameResults);
                                             cache[currentSearch].lusha = nameResults;
                                             setScrapedCompany(scraperData);
@@ -557,13 +549,11 @@ function App() {
             });
     };
 
-    // Helper to format large numbers
     const formatNumber = (num) => {
         if (!num || isNaN(num)) return '—';
         return new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(num);
     };
 
-    // Helper to format date
     const formatDate = (dateString) => {
         return new Date(dateString).toLocaleDateString(undefined, { year: 'numeric', month: 'long' });
     };
@@ -591,7 +581,6 @@ function App() {
                 </button>
             </nav>
 
-            {/* Separate History Button (Top Right) */}
             <div className="fixed top-6 right-6 z-40">
                 <button
                     onClick={() => setIsHistoryOpen(true)}
@@ -689,7 +678,7 @@ function App() {
                             </div>
                         )}
 
-                        {data && (data.Engagments?.Visits || data.EstimatedMonthlyVisits) && (
+                        {data && (data.Engagments && data.Engagments.Visits || data.EstimatedMonthlyVisits) && (
                             <div className="w-full animate-slide-up">
                                 <div className="bg-slate-800/80 backdrop-blur-md rounded-2xl border border-slate-700/50 shadow-2xl overflow-hidden">
                                     <div className="p-6 border-b border-slate-700/50 flex justify-between items-center bg-gradient-to-r from-slate-800 to-slate-900">
@@ -723,7 +712,7 @@ function App() {
                                                     <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-1">Monthly Visits</p>
                                                     <p className="text-5xl font-black text-white tracking-tight">
                                                         {(() => {
-                                                            if (data.Engagments?.Visits) return formatNumber(parseInt(data.Engagments.Visits, 10));
+                                                            if (data.Engagments && data.Engagments.Visits) return formatNumber(parseInt(data.Engagments.Visits, 10));
                                                             if (data.EstimatedMonthlyVisits) {
                                                                 const dates = Object.keys(data.EstimatedMonthlyVisits).sort((a, b) => new Date(b) - new Date(a));
                                                                 if (dates.length > 0) return formatNumber(data.EstimatedMonthlyVisits[dates[0]]);
@@ -737,8 +726,8 @@ function App() {
                                                     <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-1">Page Views</p>
                                                     <p className="text-5xl font-black text-cyan-400 tracking-tight">
                                                         {(() => {
-                                                            const visits = data.Engagments?.Visits ? parseInt(data.Engagments.Visits, 10) : (data.EstimatedMonthlyVisits ? Object.values(data.EstimatedMonthlyVisits).pop() : null);
-                                                            const ppv = data.Engagments?.PagePerVisit ? parseFloat(data.Engagments.PagePerVisit) : 1.5;
+                                                            const visits = data.Engagments && data.Engagments.Visits ? parseInt(data.Engagments.Visits, 10) : (data.EstimatedMonthlyVisits ? Object.values(data.EstimatedMonthlyVisits).pop() : null);
+                                                            const ppv = data.Engagments && data.Engagments.PagePerVisit ? parseFloat(data.Engagments.PagePerVisit) : 1.5;
                                                             if (visits) return formatNumber(Math.round(visits * ppv));
                                                             return '—';
                                                         })()}
@@ -748,19 +737,19 @@ function App() {
                                             </div>
 
                                             <div className="flex flex-wrap gap-3">
-                                                {data.GlobalRank?.Rank && (
+                                                {data.GlobalRank && data.GlobalRank.Rank && (
                                                     <div className="flex flex-col items-center bg-slate-900/60 border border-slate-700/40 rounded-xl px-5 py-3">
                                                         <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Global Rank</span>
                                                         <span className="text-2xl font-black text-cyan-400">#{formatNumber(data.GlobalRank.Rank)}</span>
                                                     </div>
                                                 )}
-                                                {data.CountryRank?.Rank && (
+                                                {data.CountryRank && data.CountryRank.Rank && (
                                                     <div className="flex flex-col items-center bg-slate-900/60 border border-slate-700/40 rounded-xl px-5 py-3">
-                                                        <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">{data.CountryRank.CountryCode || 'Country'} Rank</span>
+                                                        <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">{(data.CountryRank.CountryCode || 'Country')} Rank</span>
                                                         <span className="text-2xl font-black text-indigo-400">#{formatNumber(data.CountryRank.Rank)}</span>
                                                     </div>
                                                 )}
-                                                {data.Engagments?.PagePerVisit && (
+                                                {data.Engagments && data.Engagments.PagePerVisit && (
                                                     <div className="flex flex-col items-center bg-slate-900/60 border border-slate-700/40 rounded-xl px-5 py-3">
                                                         <span className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Pages / Visit</span>
                                                         <span className="text-2xl font-black text-emerald-400">{parseFloat(data.Engagments.PagePerVisit).toFixed(1)}</span>
@@ -878,7 +867,6 @@ function App() {
                             />
                         )}
 
-                        {/* Manual Lusha Unlock Button */}
                         {!lushaRequested && !lushaData && !lushaLoading && (data || techStack) && (
                             <div className="w-full mt-8 animate-slide-up">
                                 <div className="bg-gradient-to-br from-slate-800 to-indigo-900/30 backdrop-blur-md rounded-2xl border border-indigo-500/30 p-8 text-center shadow-2xl relative overflow-hidden group">
@@ -907,10 +895,10 @@ function App() {
                         )}
 
                         <DecisionMakers
-                            results={lushaData?.contacts}
-                            companyInfo={lushaData?.companyInfo}
+                            results={lushaData && lushaData.contacts}
+                            companyInfo={lushaData && lushaData.companyInfo}
                             scrapedCompany={scrapedCompany}
-                            requestId={lushaData?.requestId}
+                            requestId={lushaData && lushaData.requestId}
                             loading={lushaLoading}
                             error={lushaError}
                             redirectingParent={redirectingParent}
@@ -921,7 +909,6 @@ function App() {
                 )}
             </main>
 
-            {/* History Drawer */}
             {isHistoryOpen && (
                 <div className="fixed inset-0 z-50 overflow-hidden">
                     <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm transition-opacity" onClick={() => setIsHistoryOpen(false)}></div>
@@ -1013,211 +1000,4 @@ function PageSpeedResults({ mobileData, desktopData, onRetry, loading }) {
 
     if (!mobileData && !desktopData && !loading) {
         return (
-            <div className="w-full mt-8 bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 p-8 text-center animate-slide-up">
-                <div className="flex flex-col items-center gap-4">
-                    <div className="w-12 h-12 bg-slate-700/50 rounded-full flex items-center justify-center">
-                        <svg className="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h3 className="text-lg font-bold text-white">Performance Audit Failed</h3>
-                        <p className="text-slate-400 text-sm mt-1">We couldn't retrieve PageSpeed data for this domain.</p>
-                        <button
-                            onClick={onRetry}
-                            className="mt-4 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 px-6 py-2 rounded-lg text-sm font-bold transition-all flex items-center gap-2 mx-auto"
-                        >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                            </svg>
-                            Retry Performance Audit
-                        </button>
-                    </div>
-                </div>
-            </div>
-        );
-    }
-
-    if (!mobileData && !desktopData) return null;
-
-    const experiences = data?.loadingExperience || data?.originLoadingExperience;
-    const metrics = experiences?.metrics;
-    const perfScore = data?.lighthouseResult?.categories?.performance?.score;
-    const assessmentStatus = experiences?.overall_category;
-
-    const getOverallStatus = () => {
-        if (assessmentStatus === 'FAST') return 'Passed';
-        if (perfScore !== undefined && perfScore !== null) {
-            if (perfScore >= 0.8) return 'Passed';
-            if (perfScore >= 0.5) return 'Needs Improvement';
-            return 'Failed';
-        }
-        if (assessmentStatus === 'SLOW') return 'Failed';
-        if (assessmentStatus === 'AVERAGE') return 'Needs Improvement';
-        return 'No Data';
-    };
-
-    const overallStatus = getOverallStatus();
-    const overallCategory = assessmentStatus || (perfScore >= 0.8 ? 'FAST' : perfScore >= 0.5 ? 'AVERAGE' : 'SLOW');
-
-    const getStatusColor = (cat) => {
-        if (!cat) return 'text-slate-400';
-        const c = cat.toUpperCase();
-        if (c === 'FAST' || c === 'GOOD') return 'text-emerald-400';
-        if (c === 'AVERAGE' || c === 'NEEDS_IMPROVEMENT') return 'text-amber-400';
-        return 'text-red-400';
-    };
-
-    const getStatusBg = (cat) => {
-        if (!cat) return 'bg-slate-400/10';
-        const c = cat.toUpperCase();
-        if (c === 'FAST' || c === 'GOOD') return 'bg-emerald-400/10';
-        if (c === 'AVERAGE' || c === 'NEEDS_IMPROVEMENT') return 'bg-amber-400/10';
-        return 'bg-red-400/10';
-    };
-
-    const MetricCard = ({ metric, isMain = true }) => {
-        const m = metrics?.[metric.id];
-        const val = m ? (m.percentile / metric.divisor).toFixed(metric.divisor === 1 ? (metric.id.includes('SCORE') ? 2 : 0) : 1) : '—';
-        const category = m?.category || 'N/A';
-        const colorClass = getStatusColor(category);
-
-        // Progress bar logic
-        const getProgress = () => {
-            if (category === 'FAST' || category === 'GOOD') return '30%';
-            if (category === 'AVERAGE' || category === 'NEEDS_IMPROVEMENT') return '65%';
-            if (category === 'SLOW' || category === 'POOR') return '95%';
-            return '0%';
-        };
-
-        const getBarGradient = () => {
-            return `linear-gradient(to right, #10b981 0%, #10b981 33.33%, #fbbf24 33.33%, #fbbf24 66.66%, #ef4444 66.66%, #ef4444 100%)`;
-        };
-
-        if (!isMain) {
-            return (
-                <div className="bg-slate-900/40 rounded-xl p-6 border border-slate-700/20 flex justify-between items-center">
-                    <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">{metric.label} ({metric.short})</h4>
-                    <p className={`text-2xl font-black ${colorClass}`}>
-                        {val} <span className="text-xs font-normal text-slate-500 ml-0.5">{metric.unit}</span>
-                    </p>
-                </div>
-            );
-        }
-
-        return (
-            <div className="bg-slate-900/40 rounded-xl p-6 border border-slate-700/20 flex flex-col">
-                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">{metric.label} ({metric.short})</h4>
-                <div className="flex items-baseline gap-1 mt-2 mb-4">
-                    <span className={`text-4xl font-black ${colorClass}`}>{val}</span>
-                    <span className="text-sm font-normal text-slate-500">{metric.unit}</span>
-                </div>
-
-                {/* Progress Bar Container */}
-                <div className="relative h-1.5 w-full rounded-full overflow-hidden mb-2" style={{ background: '#1e293b' }}>
-                    <div className="absolute inset-0 z-0 h-full w-full" style={{ background: getBarGradient(), opacity: 0.8 }} />
-                    {/* Indicator */}
-                    <div
-                        className="absolute h-full w-1.5 bg-white z-10 shadow-[0_0_8px_rgba(255,255,255,0.8)] transition-all duration-1000"
-                        style={{ left: `calc(${getProgress()} - 0.75px)` }}
-                    />
-                </div>
-
-                <div className="flex justify-between text-[8px] font-black text-slate-600 uppercase tracking-widest mb-6">
-                    <span>Good</span>
-                    <span>Poor</span>
-                </div>
-
-                <div className="mt-auto pt-4 border-t border-slate-800/50 flex justify-between items-center">
-                    <div>
-                        <p className="text-[8px] font-black text-slate-600 uppercase tracking-widest leading-tight">75th Percentile -</p>
-                        <p className="text-[10px] font-bold text-slate-500">{val}{metric.unit}</p>
-                    </div>
-                    {(category === 'FAST' || category === 'GOOD') && (
-                        <span className="text-[8px] font-black text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded border border-emerald-400/20 tracking-tighter">FAST</span>
-                    )}
-                </div>
-            </div>
-        );
-    };
-
-    const cwvis = [
-        { id: 'LARGEST_CONTENTFUL_PAINT_MS', label: 'Largest Contentful Paint', short: 'LCP', unit: 's', divisor: 1000 },
-        { id: 'INTERACTION_TO_NEXT_PAINT', label: 'Interaction to Next Paint', short: 'INP', unit: 'ms', divisor: 1 },
-        { id: 'CUMULATIVE_LAYOUT_SHIFT_SCORE', label: 'Cumulative Layout Shift', short: 'CLS', unit: '', divisor: 100 },
-    ];
-
-    const notableMetrics = [
-        { id: 'FIRST_CONTENTFUL_PAINT_MS', label: 'FIRST CONTENTFUL PAINT', short: 'FCP', unit: 's', divisor: 1000 },
-        { id: 'EXPERIMENTAL_TIME_TO_FIRST_BYTE', label: 'TIME TO FIRST BYTE', short: 'TTFB', unit: 's', divisor: 1000 },
-    ];
-
-    return (
-        <div className="w-full mt-8 animate-slide-up">
-            <div className="bg-slate-800/80 backdrop-blur-md rounded-3xl border border-slate-700/50 shadow-2xl overflow-hidden">
-                {/* Header Section */}
-                <div className="p-8 pb-4">
-                    <div className="flex justify-between items-start mb-6">
-                        <div className="flex items-center gap-5">
-                            <div className="w-14 h-14 rounded-full bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
-                                <svg className="w-7 h-7 text-emerald-400" fill="currentColor" viewBox="0 0 20 20">
-                                    <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
-                                </svg>
-                            </div>
-                            <div>
-                                <h2 className="text-2xl font-black text-white tracking-tight">Core Web Vitals Assessment</h2>
-                                <div className="flex items-center gap-3 mt-1">
-                                    <span className={`text-base font-bold ${getStatusColor(overallCategory)}`}>{overallStatus}</span>
-                                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] pt-0.5">Performance Score: <span className={getStatusColor(overallCategory)}>{data ? Math.round(data.lighthouseResult?.categories?.performance?.score * 100) : '—'}%</span></span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="flex bg-slate-900/80 rounded-xl p-1 border border-slate-700/50">
-                            {['mobile', 'desktop'].map(s => (
-                                <button
-                                    key={s}
-                                    onClick={() => setStrategy(s)}
-                                    className={`px-5 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${strategy === s ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
-                                >
-                                    {s}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-
-                {!data ? (
-                    <div className="px-8 pb-12 text-center text-slate-500 text-sm italic">
-                        No {strategy} data available for this domain.
-                    </div>
-                ) : (
-                    <div className="px-8 pb-8">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-                            {cwvis.map(m => (
-                                <MetricCard key={m.id} metric={m} />
-                            ))}
-                        </div>
-
-                        <div className="mb-4">
-                            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">Other Notable Metrics</h3>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {notableMetrics.map(m => (
-                                    <MetricCard key={m.id} metric={m} isMain={false} />
-                                ))}
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* Footer */}
-                <div className="px-8 py-5 bg-slate-900/80 flex justify-between items-center border-t border-slate-700/50">
-                    <span className="text-[9px] text-slate-600 font-black uppercase tracking-[0.2em] italic">Lighthouse Engine {data?.lighthouseResult?.lighthouseVersion || '13.0.1'}</span>
-                    <span className="text-[9px] text-slate-600 font-black uppercase tracking-[0.2em]">Performance Score: <span className={getStatusColor(overallCategory)}>{data ? Math.round(data.lighthouseResult?.categories?.performance?.score * 100) : '—'}%</span></span>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-export default App;
+            <div className="w-full mt-8 bg-slate-800/50 backdrop-blur-md rounded-2xl border border-slate-700/50 p-8 text-center
